@@ -6,7 +6,7 @@ services:
       - "8000:8000"
     environment:
       - DATABASE_URL=${DATABASE_URL:-sqlite+aiosqlite:///./app.db}
-      - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-ollama}
+      - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-hash}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
       - EMBEDDING_DIMENSION=${EMBEDDING_DIMENSION:-768}
       - LLM_PROVIDER=${LLM_PROVIDER:-ollama}

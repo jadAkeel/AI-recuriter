@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     database_url: AnyUrl = "sqlite+aiosqlite:///./app.db"
     api_prefix: str = "/api/v1"
-    embedding_provider: str = "ollama"
+    embedding_provider: str = "hash"
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     multilingual_embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     embedding_dimension: int = 384
