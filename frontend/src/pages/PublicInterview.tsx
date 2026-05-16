@@ -1,10 +1,19 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import { Send, CheckCircle, AlertCircle, Loader, Keyboard, Mic } from 'lucide-react';
-import type { InterviewEvaluation, InterviewSessionResponse } from '../types/api';
+import type { InterviewEvaluation, InterviewQuestion, InterviewSessionResponse, PublicInterviewAnswerResponse } from '../types/api';
 import VoiceRecorder from '../components/VoiceRecorder';
 
 const API = '/api/v1';
+
+const getResponseError = async (res: Response, fallback: string) => {
+  try {
+    const data = await res.json();
+    return typeof data.detail === 'string' ? data.detail : fallback;
+  } catch {
+    return fallback;
+  }
+};
 
 export default function PublicInterview() {
   const { session_id } = useParams();
@@ -18,6 +27,7 @@ export default function PublicInterview() {
   const [mode, setMode] = useState<'text' | 'voice'>('text');
   const [done, setDone] = useState(false);
   const [result, setResult] = useState<InterviewEvaluation | null>(null);
+  const [submitError, setSubmitError] = useState('');
 
   useEffect(() => {
     if (!session_id) return;
@@ -37,17 +47,19 @@ export default function PublicInterview() {
       .finally(() => setLoading(false));
   }, [session_id]);
 
-  const finishOrAdvance = async () => {
+  const finishOrAdvance = async (nextQuestion?: InterviewQuestion | null) => {
     if (!interview) return;
-    if (currentQIndex < interview.questions.length - 1) {
-      setCurrentQIndex(currentQIndex + 1);
+    const answeredCount = (interview.answered_count ?? 0) + 1;
+    if (nextQuestion) {
+      setInterview({ ...interview, questions: [nextQuestion], answered_count: answeredCount });
+      setCurrentQIndex(0);
       setAnswer('');
     } else {
       const evalRes = await fetch(`${API}/interviews/public/${session_id}/evaluate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
       });
-      if (!evalRes.ok) throw new Error('Interview evaluation failed');
+      if (!evalRes.ok) throw new Error(await getResponseError(evalRes, 'Interview evaluation failed'));
       const evalData = await evalRes.json();
       setResult(evalData);
       setDone(true);
@@ -57,6 +69,7 @@ export default function PublicInterview() {
   const submitAnswer = async () => {
     if (!interview || !answer.trim()) return;
     setSubmitting(true);
+    setSubmitError('');
     const q = interview.questions[currentQIndex];
     const realQId = q.id || q.question_id;
     if (!realQId) {
@@ -71,17 +84,19 @@ export default function PublicInterview() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ question_id: realQId, answer }),
       });
-      if (!res.ok) throw new Error('Answer submission failed');
-      await res.json();
-      await finishOrAdvance();
-    } catch {
-      setError('Failed to submit answer');
+      if (!res.ok) throw new Error(await getResponseError(res, 'Answer submission failed'));
+      const data = await res.json() as PublicInterviewAnswerResponse;
+      await finishOrAdvance(data.next_question);
+    } catch (err) {
+      setSubmitError(err instanceof Error ? err.message : 'Failed to submit answer');
+    } finally {
+      setSubmitting(false);
     }
-    setSubmitting(false);
   };
 
   const submitVoiceAnswer = async (blob: Blob) => {
     if (!interview) return;
+    setSubmitError('');
     const q = interview.questions[currentQIndex];
     const realQId = q.id || q.question_id;
     if (!realQId) {
@@ -99,12 +114,11 @@ export default function PublicInterview() {
         method: 'POST',
         body: formData,
       });
-      if (!res.ok) throw new Error('Voice answer submission failed');
-      const data = await res.json();
-      setAnswer(data.answer || '');
-      await finishOrAdvance();
-    } catch {
-      setError('Failed to submit voice answer');
+      if (!res.ok) throw new Error(await getResponseError(res, 'Voice answer submission failed'));
+      const data = await res.json() as PublicInterviewAnswerResponse;
+      await finishOrAdvance(data.next_question);
+    } catch (err) {
+      setSubmitError(err instanceof Error ? err.message : 'Failed to submit voice answer');
     } finally {
       setTranscribing(false);
       setSubmitting(false);
@@ -157,6 +171,9 @@ export default function PublicInterview() {
   if (!interview) return null;
 
   const currentQ = interview.questions[currentQIndex];
+  const answeredCount = interview.answered_count ?? 0;
+  const totalQuestions = interview.total_questions ?? interview.questions.length;
+  const hasNextQuestion = answeredCount + 1 < totalQuestions;
 
   return (
     <div className="min-h-screen bg-gray-50 py-12 px-4">
@@ -170,7 +187,7 @@ export default function PublicInterview() {
         <div className="bg-white rounded-xl shadow-sm border p-6">
           <div className="flex items-center justify-between mb-4">
             <span className="text-sm text-gray-500">
-              Question {(interview.answered_count ?? 0) + currentQIndex + 1} of {interview.total_questions ?? interview.questions.length}
+              Question {answeredCount + currentQIndex + 1} of {totalQuestions}
             </span>
             <span className="text-xs bg-blue-50 text-blue-600 px-2 py-0.5 rounded">{currentQ?.skill || currentQ?.category || 'General'}</span>
           </div>
@@ -215,6 +232,12 @@ export default function PublicInterview() {
             </div>
           )}
 
+          {submitError && (
+            <div className="bg-red-50 border border-red-200 rounded-lg p-3 mb-4 text-sm text-red-700">
+              {submitError}
+            </div>
+          )}
+
           {mode === 'text' && (
             <button
               onClick={submitAnswer}
@@ -222,7 +245,7 @@ export default function PublicInterview() {
               className="w-full flex items-center justify-center gap-2 px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 font-medium"
             >
               <Send className="w-4 h-4" />
-              {submitting ? 'Saving...' : currentQIndex < interview.questions.length - 1 ? 'Next Question' : 'Finish Interview'}
+              {submitting ? 'Saving...' : hasNextQuestion ? 'Next Question' : 'Finish Interview'}
             </button>
           )}
         </div>

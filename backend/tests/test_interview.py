@@ -4,6 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.core.db import SessionLocal, init_db
+from app.core.config import settings
 from app.main import create_app
 from app.models.candidate import Candidate
 from app.models.interview import InterviewSession
@@ -210,6 +211,69 @@ def test_staff_start_interview_does_not_return_questions() -> None:
 
     assert response.status_code == 200, response.text
     assert response.json()["questions"] == []
+
+
+def test_invite_reports_email_configuration_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    monkeypatch.setattr(settings, "smtp_host", "smtp.gmail.com")
+    monkeypatch.setattr(settings, "smtp_username", "")
+    monkeypatch.setattr(settings, "smtp_password", "")
+
+    async def _seed() -> tuple[str, str, str, str, str]:
+        await init_db()
+        recruiter_email = f"invite-recruiter-{uuid.uuid4().hex[:8]}@example.com"
+        candidate_email = f"invite-candidate-{uuid.uuid4().hex[:8]}@example.com"
+        password = "password123"
+        async with SessionLocal() as session:
+            job_id = str(uuid.uuid4())
+            candidate_id = str(uuid.uuid4())
+            session.add(User(
+                id=str(uuid.uuid4()),
+                email=recruiter_email,
+                password_hash=hash_password(password),
+                full_name="Invite Recruiter",
+                role="recruiter",
+            ))
+            session.add(Job(
+                id=job_id,
+                title="AI Engineer",
+                description="AI engineer with NLP skills.",
+                required_skills=["nlp"],
+                optional_skills=[],
+                seniority="mid",
+            ))
+            session.add(Candidate(
+                id=candidate_id,
+                full_name="Invite Candidate",
+                email=candidate_email,
+                phone="+123",
+                skills=["nlp"],
+                experience=["Built NLP systems"],
+                education=["BSc"],
+                projects=["NLP API"],
+                raw_text="NLP engineer.",
+            ))
+            await session.commit()
+            return recruiter_email, password, job_id, candidate_id, candidate_email
+
+    recruiter_email, password, job_id, candidate_id, candidate_email = asyncio.run(_seed())
+    app = create_app()
+    with TestClient(app) as client:
+        login = client.post("/api/v1/auth/login", json={"email": recruiter_email, "password": password})
+        token = login.json()["access_token"]
+        response = client.post(
+            "/api/v1/interviews/invite",
+            json={"job_id": job_id, "candidate_id": candidate_id},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["email_sent"] is False
+    assert data["email_to"] == candidate_email
+    assert "SMTP_USERNAME" in data["email_error"]
+    assert data["total_questions"] == 1
 
 
 def test_interview_websocket_live_chat_flow() -> None:

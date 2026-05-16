@@ -46,6 +46,18 @@ class PublicAnswerRequest(BaseModel):
     answer: str
 
 
+class InviteResponse(BaseModel):
+    session_id: str
+    candidate_name: str | None = None
+    job_title: str | None = None
+    email_sent: bool
+    email_to: str | None = None
+    email_error: str | None = None
+    interview_link: str
+    status: str
+    total_questions: int
+
+
 class ChatAnswerResponse(BaseModel):
     question_id: str
     skill: str
@@ -170,6 +182,16 @@ def _interview_error(exc: ValueError) -> HTTPException:
     return HTTPException(status_code=400, detail=message)
 
 
+def _email_configuration_error() -> str | None:
+    if not settings.smtp_host:
+        return "SMTP is not configured. Set SMTP_HOST, SMTP_USERNAME, and SMTP_PASSWORD in backend/.env."
+    if not settings.smtp_username:
+        return "SMTP_USERNAME is missing in backend/.env."
+    if not settings.smtp_password:
+        return "SMTP_PASSWORD is missing in backend/.env. For Gmail, use a 16-character Google App Password."
+    return None
+
+
 @router.post("/interviews/start", response_model=StartInterviewResponse)
 async def start_interview(
     request: StartInterviewRequest,
@@ -200,7 +222,7 @@ async def start_interview(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.post("/interviews/invite")
+@router.post("/interviews/invite", response_model=InviteResponse)
 async def invite_candidate(
     request: StartInterviewRequest,
     session: AsyncSession = Depends(get_db_session),
@@ -223,17 +245,25 @@ async def invite_candidate(
         email = candidate.email if candidate else None
         job_title_str = job.title if job else job_title
 
+        email_error = None
         from app.services.email import send_interview_invitation
         if email:
-            email_sent = await send_interview_invitation(
-                to_email=email,
-                candidate_name=candidate_name or "Candidate",
-                job_title=job_title_str or "Position",
-                session_id=interview.id,
-                base_url=settings.app_base_url,
-            )
+            email_error = _email_configuration_error()
+            if email_error:
+                email_sent = False
+            else:
+                email_sent = await send_interview_invitation(
+                    to_email=email,
+                    candidate_name=candidate_name or "Candidate",
+                    job_title=job_title_str or "Position",
+                    session_id=interview.id,
+                    base_url=settings.app_base_url,
+                )
+                if not email_sent:
+                    email_error = "SMTP send failed. Check Gmail App Password / SMTP settings and backend logs."
         else:
             email_sent = False
+            email_error = "Candidate has no email address."
 
         base_url = settings.app_base_url.rstrip("/")
         interview_link = f"{base_url}/interview/{interview.id}" if base_url else f"/interview/{interview.id}"
@@ -244,8 +274,10 @@ async def invite_candidate(
             "job_title": job_title_str,
             "email_sent": email_sent,
             "email_to": email,
+            "email_error": email_error,
             "interview_link": interview_link,
             "status": "invited",
+            "total_questions": len(interview.questions or []),
         }
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

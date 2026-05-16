@@ -17,10 +17,18 @@ async def _send_email_smtp(to_email: str, subject: str, html_body: str) -> bool:
         logger.warning("SMTP not configured. Email not sent.")
         return False
 
+    from_email = settings.smtp_from_email or settings.smtp_username
+    if not from_email:
+        logger.warning("SMTP sender is not configured. Email not sent.")
+        return False
+    if settings.smtp_username and not settings.smtp_password:
+        logger.warning("SMTP password is missing. Email not sent.")
+        return False
+
     loop = asyncio.get_running_loop()
     try:
         msg = MIMEMultipart("alternative")
-        msg["From"] = settings.smtp_from_email or settings.smtp_username
+        msg["From"] = from_email
         msg["To"] = to_email
         msg["Subject"] = subject
         msg.attach(MIMEText(html_body, "html"))

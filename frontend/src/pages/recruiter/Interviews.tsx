@@ -9,8 +9,10 @@ interface InviteResponse {
   job_title?: string | null;
   email_sent: boolean;
   email_to?: string | null;
+  email_error?: string | null;
   interview_link?: string;
   status: string;
+  total_questions?: number;
 }
 
 export default function RecruiterInterviews() {
@@ -138,6 +140,12 @@ export default function RecruiterInterviews() {
             </div>
           </div>
 
+          {invite.email_error && (
+            <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 mb-5 text-sm text-yellow-800">
+              Email was not sent: {invite.email_error}
+            </div>
+          )}
+
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-5">
             <div>
               <p className="text-sm text-gray-500">Candidate</p>
@@ -146,6 +154,10 @@ export default function RecruiterInterviews() {
             <div>
               <p className="text-sm text-gray-500">Job</p>
               <p className="font-medium text-gray-900">{invite.job_title || 'Position'}</p>
+            </div>
+            <div>
+              <p className="text-sm text-gray-500">Questions</p>
+              <p className="font-medium text-gray-900">{invite.total_questions ?? 0}</p>
             </div>
           </div>
 

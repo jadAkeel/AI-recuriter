@@ -433,6 +433,18 @@ class HybridMatchingEngine:
         ]
         candidate_skills = self._dedupe_skills(candidate.skills or [])
         
+        # Log for debugging
+        logger.info(
+            "Skill matching started",
+            extra={
+                "job_id": job.id,
+                "candidate_id": candidate.id,
+                "required_skills": required_skills,
+                "candidate_skills": candidate_skills,
+                "has_skills": bool(candidate_skills),
+            },
+        )
+        
         if not required_skills and not optional_skills:
             result.skill_score = 0.5  # Neutral score when no requirements
             return result
@@ -509,8 +521,9 @@ class HybridMatchingEngine:
         """Match a single required skill against candidate skills."""
         req_lower = required_skill.lower().strip()
         
-        # Direct match
-        if req_lower in [s.lower() for s in candidate_skills]:
+        # Direct match - normalize both sides for comparison
+        candidate_skills_lower = [s.lower().strip() for s in candidate_skills]
+        if req_lower in candidate_skills_lower:
             confidence = self._evidence_adjusted_confidence(required_skill, candidate, 1.0)
             return SkillMatch(
                 skill=required_skill,

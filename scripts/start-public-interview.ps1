@@ -92,6 +92,26 @@ function Wait-LocalTunnelUrl {
     throw "Timed out waiting for localtunnel URL"
 }
 
+function Get-EnvValue {
+    param(
+        [string]$Path,
+        [string]$Key
+    )
+
+    if (-not (Test-Path $Path)) {
+        return ""
+    }
+
+    $escapedKey = [Regex]::Escape($Key)
+    foreach ($line in Get-Content $Path) {
+        if ($line -match "^${escapedKey}=(.*)$") {
+            return $matches[1]
+        }
+    }
+
+    return ""
+}
+
 Set-EnvValue -Path $envPath -Key "SMTP_HOST" -Value "smtp.gmail.com"
 Set-EnvValue -Path $envPath -Key "SMTP_PORT" -Value "587"
 Set-EnvValue -Path $envPath -Key "SMTP_USERNAME" -Value $GmailAddress
@@ -111,7 +131,7 @@ try {
     $frontendProc = Start-Process -WindowStyle Hidden -PassThru -FilePath "C:\Program Files\nodejs\npm.cmd" -ArgumentList @("run", "dev", "--", "--host", "0.0.0.0", "--port", "$FrontendPort") -WorkingDirectory $frontendDir
     Wait-Url -Url "http://127.0.0.1:$FrontendPort"
 
-    $tunnelProc = Start-Process -WindowStyle Hidden -PassThru -FilePath "C:\Program Files\nodejs\npx.cmd" -ArgumentList @("-y", "localtunnel", "--port", "$FrontendPort") -WorkingDirectory $frontendDir -RedirectStandardOutput $localTunnelLog -RedirectStandardError $localTunnelErrorLog
+    $tunnelProc = Start-Process -WindowStyle Hidden -PassThru -FilePath "C:\Program Files\nodejs\npx.cmd" -ArgumentList @("-y", "localtunnel", "--port", "$FrontendPort", "--local-host", "127.0.0.1") -WorkingDirectory $frontendDir -RedirectStandardOutput $localTunnelLog -RedirectStandardError $localTunnelErrorLog
     $publicUrl = Wait-LocalTunnelUrl -LogPaths @($localTunnelLog, $localTunnelErrorLog)
     Set-EnvValue -Path $envPath -Key "APP_BASE_URL" -Value $publicUrl
 
@@ -124,7 +144,7 @@ try {
     Write-Output "Backend PID  : $($backendProc.Id)"
     Write-Output "Public URL   : $publicUrl"
     Write-Output ""
-    if (-not $GmailAppPassword) {
+    if (-not (Get-EnvValue -Path $envPath -Key "SMTP_PASSWORD")) {
         Write-Output "SMTP_PASSWORD is still empty in backend/.env"
         Write-Output "Add your 16-character Gmail App Password, then restart the backend process."
     } else {

@@ -102,6 +102,20 @@ export interface InterviewEvaluation {
   total_questions?: number;
 }
 
+export interface PublicInterviewAnswerResponse {
+  question_id: string;
+  skill: string;
+  question: string;
+  answer: string;
+  score: number;
+  feedback: string;
+  language_detected: string;
+  strengths: string[];
+  weaknesses: string[];
+  using_llm: boolean;
+  next_question?: InterviewQuestion | null;
+}
+
 export interface SkillGapItem {
   skill: string;
   matched: boolean;
