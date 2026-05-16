@@ -433,21 +433,13 @@ class HybridMatchingEngine:
         ]
         candidate_skills = self._dedupe_skills(candidate.skills or [])
         
-        # Detailed logging for debugging
-        logger.info(
-            "=== SKILL MATCHING DEBUG ===",
-            extra={
-                "job_id": job.id,
-                "candidate_id": candidate.id,
-                "candidate_email": candidate.email,
-                "required_skills_count": len(required_skills),
-                "required_skills": required_skills,
-                "candidate_skills_count": len(candidate_skills),
-                "candidate_skills_sample": candidate_skills[:15],  # First 15 skills
-                "candidate_has_skills": bool(candidate_skills),
-                "candidate_skills_full": candidate_skills if len(candidate_skills) <= 20 else f"{len(candidate_skills)} skills total",
-            },
-        )
+        # Print debug info directly to console
+        print(f"\n{'='*60}")
+        print(f"SKILL MATCHING DEBUG - Candidate: {candidate.email}")
+        print(f"Job: {job.title}")
+        print(f"Required Skills ({len(required_skills)}): {required_skills}")
+        print(f"Candidate Skills ({len(candidate_skills)}): {candidate_skills[:20]}{'...' if len(candidate_skills) > 20 else ''}")
+        print(f"{'='*60}\n")
         
         if not required_skills and not optional_skills:
             result.skill_score = 0.5  # Neutral score when no requirements
@@ -460,10 +452,7 @@ class HybridMatchingEngine:
             if norm:
                 candidate_normalized[skill.lower()] = norm
         
-        logger.info(
-            f"Candidate has {len(candidate_normalized)} ESCO-normalized skills out of {len(candidate_skills)} total",
-            extra={"candidate_id": candidate.id},
-        )
+        print(f"Candidate has {len(candidate_normalized)} ESCO-normalized skills out of {len(candidate_skills)} total")
         
         # Match required skills
         esco_matches = 0
@@ -481,15 +470,9 @@ class HybridMatchingEngine:
                 result.missing_required.append(req_skill)
                 missing_count += 1
         
-        logger.info(
-            f"Required skills: {matched_count} matched, {missing_count} missing out of {len(required_skills)} total",
-            extra={
-                "candidate_id": candidate.id,
-                "matched": matched_count,
-                "missing": missing_count,
-                "total": len(required_skills),
-            },
-        )
+        print(f"Required skills: {matched_count} matched, {missing_count} missing out of {len(required_skills)} total")
+        print(f"Matched: {[m.skill for m in result.matched_required]}")
+        print(f"Missing: {result.missing_required}")
         
         # Match optional skills
         for opt_skill in optional_skills:
@@ -521,10 +504,7 @@ class HybridMatchingEngine:
         total_skills = total_required + total_optional
         result.esco_coverage = esco_matches / total_skills if total_skills > 0 else 0.0
         
-        logger.info(
-            f"Final skill scores - required: {result.required_score:.2f}, optional: {result.optional_score:.2f}, combined: {result.skill_score:.2f}",
-            extra={"candidate_id": candidate.id},
-        )
+        print(f"Final scores - required: {result.required_score:.2f}, optional: {result.optional_score:.2f}, combined: {result.skill_score:.2f}")
         
         return result
 
