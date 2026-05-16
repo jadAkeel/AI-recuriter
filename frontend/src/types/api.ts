@@ -31,12 +31,31 @@ export interface MatchReasoning {
   skill_score?: number;
   required_score?: number;
   optional_score?: number;
+  semantic_score?: number;
+  cross_encoder_score?: number | null;
+  years_score?: number;
+  missing_penalty?: number;
   matched_required?: string[];
   missing_required?: string[];
   matched_optional?: string[];
   estimated_years?: number;
   overqualified?: boolean;
   used_cross_encoder?: boolean;
+  scoring_model?: string;
+  scoring_formula?: string;
+  score_breakdown?: Record<string, number>;
+  score_weights?: Record<string, number>;
+  score_contributions?: Record<string, number>;
+  score_penalties?: Record<string, number>;
+  pre_cap_score?: number;
+  score_cap?: number;
+  score_cap_reason?: string;
+  final_score?: number;
+  esco_coverage?: number;
+  seniority_match?: string;
+  strengths?: string[];
+  gaps?: string[];
+  recommendations?: string[];
 }
 
 export interface MatchResult {

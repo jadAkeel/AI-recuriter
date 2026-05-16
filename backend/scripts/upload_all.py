@@ -1,17 +1,20 @@
 """
 Upload all CVs with Ollama for matching.
 """
+import getpass
+import os
 import httpx, sys, time, subprocess
 from pathlib import Path
 
 PORT = 8000
 BASE = f"http://localhost:{PORT}/api/v1"
-CV_FOLDER = Path(__file__).parent / "cvs_to_upload"
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+CV_FOLDER = BACKEND_DIR / "cvs_to_upload"
 
 # Start server
 proc = subprocess.Popen(
     [sys.executable, '-m', 'uvicorn', 'app.main:app', '--host', '0.0.0.0', '--port', str(PORT), '--log-level', 'info'],
-    cwd=str(Path(__file__).parent),
+    cwd=str(BACKEND_DIR),
     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
 )
 print(f'Server PID: {proc.pid}')
@@ -22,8 +25,8 @@ try:
     print(f'Health: {r.json()}')
 
     # Register + login
-    email = "jadakeel05@gmail.com"
-    password = "123"
+    email = os.environ.get("AI_RECRUITER_ADMIN_EMAIL") or input("Admin email: ").strip()
+    password = os.environ.get("AI_RECRUITER_ADMIN_PASSWORD") or getpass.getpass("Admin password: ")
     r = httpx.post(f"{BASE}/auth/register", json={"email": email, "password": password, "full_name": "Admin"}, timeout=10)
     if r.status_code == 409:
         print("User already exists")

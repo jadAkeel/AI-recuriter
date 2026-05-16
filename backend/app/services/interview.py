@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import random
 import uuid
 from typing import Any
 
@@ -130,6 +129,132 @@ def _get_questions_for_skill(skill: str, seniority: str) -> list[dict[str, str]]
     return matching[:2]
 
 
+def _dedupe_preserve_order(items: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in items or []:
+        normalized = item.lower().strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(item)
+    return result
+
+
+def _stable_question_id(candidate_id: str, job_id: str, skill: str, question: str) -> str:
+    key = f"{candidate_id}:{job_id}:{skill.lower().strip()}:{question}"
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, key))
+
+
+def _candidate_evidence_for_skill(candidate: Candidate, skill: str) -> str | None:
+    skill_lower = skill.lower().strip()
+    for detail in candidate.skills_detailed or []:
+        if not isinstance(detail, dict):
+            continue
+        name = str(detail.get("name", "")).lower().strip()
+        context = str(detail.get("context", "")).strip()
+        status = str(detail.get("status", "")).lower().strip()
+        if name == skill_lower and context and status != "no_experience":
+            return context[:220]
+
+    for line in list(candidate.experience or []) + list(candidate.projects or []) + list(candidate.education or []):
+        if skill_lower in str(line).lower():
+            return str(line).strip()[:220]
+    return None
+
+
+def _evaluation_criteria_for_skill(skill: str, grounded: bool) -> list[str]:
+    criteria = [
+        f"Accurate understanding of {skill}",
+        "Practical example grounded in the candidate's own experience",
+        "Clear trade-offs, constraints, or failure modes",
+        "Communication clarity",
+    ]
+    if not grounded:
+        criteria[1] = "Honest handling of missing CV evidence; says not found if no experience exists"
+    return criteria
+
+
+def _question_for_skill(
+    candidate: Candidate,
+    job: Job,
+    skill: str,
+    difficulty: str,
+    required: bool,
+) -> QuestionItem:
+    evidence = _candidate_evidence_for_skill(candidate, skill)
+    role = job.title or "this role"
+    if evidence:
+        question = (
+            f"Your CV mentions: \"{evidence}\". For the {role} role, how did you use {skill}, "
+            "what trade-offs did you make, and how did you validate the result?"
+        )
+        hint = f"Look for a specific {skill} example tied to the cited CV evidence."
+    elif required:
+        question = (
+            f"The job requires {skill}, but it was not found in the parsed CV. "
+            "Describe directly relevant experience if you have it; otherwise say not found."
+        )
+        hint = "Look for honest gap handling and any transferable evidence."
+    else:
+        templates = _get_questions_for_skill(skill, difficulty)
+        if templates:
+            question = templates[0]["question"]
+            difficulty = templates[0].get("difficulty", difficulty)
+        else:
+            question = f"How would you apply {skill} in a practical {role} project?"
+        hint = f"Look for practical, role-relevant {skill} knowledge."
+
+    return QuestionItem(
+        id=_stable_question_id(candidate.id, job.id, skill, question),
+        skill=skill,
+        question=question,
+        difficulty=difficulty,
+        expected_answer_hint=hint,
+        evaluation_criteria=_evaluation_criteria_for_skill(skill, evidence is not None),
+        tags=[skill.lower().strip(), "grounded" if evidence else "requirement-gap" if required else "job-skill"],
+    )
+
+
+def build_grounded_question_items(candidate: Candidate, job: Job, limit: int = 8) -> list[QuestionItem]:
+    seniority = (job.seniority or "mid").lower()
+    required_skills = _dedupe_preserve_order(job.required_skills or [])
+    optional_skills = [
+        skill for skill in _dedupe_preserve_order(job.optional_skills or [])
+        if skill.lower().strip() not in {req.lower().strip() for req in required_skills}
+    ]
+
+    questions: list[QuestionItem] = []
+    seen_questions: set[str] = set()
+
+    for skill in required_skills + optional_skills:
+        required = skill.lower().strip() in {req.lower().strip() for req in required_skills}
+        item = _question_for_skill(candidate, job, skill, seniority, required)
+        if item.question not in seen_questions:
+            questions.append(item)
+            seen_questions.add(item.question)
+        if len(questions) >= limit:
+            return questions
+
+    if questions:
+        return questions
+
+    role = job.title or "the role"
+    for index, q in enumerate(GENERAL_QUESTIONS[: min(3, limit)]):
+        question = f"For {role}, {q['question'][0].lower() + q['question'][1:]}"
+        questions.append(QuestionItem(
+            id=_stable_question_id(candidate.id, job.id, "general", f"{index}:{question}"),
+            skill="general",
+            question=question,
+            difficulty=q.get("difficulty", seniority),
+            category="Behavioral",
+            expected_answer_hint="Look for a specific example from the CV or candidate's actual experience.",
+            evaluation_criteria=["Specificity", "Role relevance", "Communication clarity"],
+            tags=["behavioral", "fallback"],
+        ))
+    return questions
+
+
 async def generate_interview_questions(
     session: AsyncSession,
     candidate_id: str,
@@ -147,26 +272,7 @@ async def generate_interview_questions(
     if job is None:
         raise ValueError("Job not found")
 
-    all_skills = list(set(candidate.skills + job.required_skills))
-    seniority = job.seniority or "mid"
-
-    questions: list[QuestionItem] = []
-    seen_questions: set[str] = set()
-
-    for skill in all_skills:
-        skill_qs = _get_questions_for_skill(skill, seniority)
-        for q in skill_qs:
-            if q["question"] not in seen_questions:
-                questions.append(QuestionItem(id=str(uuid.uuid4()), skill=skill, **q))
-                seen_questions.add(q["question"])
-
-    random.shuffle(questions)
-    questions = questions[:8]
-
-    if len(questions) < 3:
-        remaining = 5 - len(questions)
-        for q in GENERAL_QUESTIONS[:remaining]:
-            questions.append(QuestionItem(id=str(uuid.uuid4()), skill="general", **q))
+    questions = build_grounded_question_items(candidate, job, limit=8)
 
     return questions, candidate, job
 
@@ -249,9 +355,15 @@ async def submit_answer(
     if question_item is None:
         raise ValueError("Question not found")
 
+    answers = list(interview.answers or [])
+    if len(answers) >= len(questions):
+        raise ValueError("Interview already completed")
+    expected_question = questions[len(answers)]
+    if expected_question.id != question_id:
+        raise ValueError("Answer does not match the current question")
+
     score, feedback = _evaluate_single_answer(question_item.question, answer, question_item.skill)
 
-    answers = list(interview.answers or [])
     evaluations = list(interview.evaluations or [])
     answers.append(answer)
     evaluations.append({"question_id": question_id, "score": score, "feedback": feedback})

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class QuestionItem(BaseModel):
@@ -12,6 +12,12 @@ class QuestionItem(BaseModel):
     expected_answer_hint: str | None = None
     evaluation_criteria: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
+
+    @field_validator("difficulty")
+    @classmethod
+    def _normalize_difficulty(cls, value: str) -> str:
+        difficulty = str(value or "mid").strip().lower()
+        return difficulty if difficulty in {"junior", "mid", "senior", "medium"} else "mid"
 
 
 class StartInterviewRequest(BaseModel):
@@ -40,6 +46,14 @@ class AnswerResponse(BaseModel):
     answer: str
     score: float
     feedback: str
+
+    @field_validator("score", mode="before")
+    @classmethod
+    def _clamp_score(cls, value: float) -> float:
+        try:
+            return max(0.0, min(1.0, float(value)))
+        except (TypeError, ValueError):
+            return 0.0
 
 
 class InterviewSessionStatus(BaseModel):
@@ -82,3 +96,11 @@ class InterviewScoreBreakdown(BaseModel):
     behavioral: float = 0.0
     communication: float = 0.0
     overall: float = 0.0
+
+    @field_validator("technical", "problem_solving", "behavioral", "communication", "overall", mode="before")
+    @classmethod
+    def _clamp_scores(cls, value: float) -> float:
+        try:
+            return max(0.0, min(1.0, float(value)))
+        except (TypeError, ValueError):
+            return 0.0

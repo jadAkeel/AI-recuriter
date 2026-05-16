@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import base64
+import inspect
 import json
 import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.db import get_db_session
+from app.core.db import SessionLocal
 from app.core.redis import get_redis
 from app.models.interview import InterviewSession as InterviewSessionModel
+from app.services.auth import decode_token, get_user_by_id
 from app.services.voice_service import get_voice_service
 
 logger = logging.getLogger(__name__)
@@ -21,9 +22,32 @@ router = APIRouter()
 _webrtc_sessions: dict[str, dict[str, object]] = {}
 
 
+async def _authenticate_websocket(websocket: WebSocket) -> bool:
+    token = websocket.query_params.get("token")
+    if not token:
+        auth_header = websocket.headers.get("authorization", "")
+        if auth_header.lower().startswith("bearer "):
+            token = auth_header[7:].strip()
+
+    payload = decode_token(token or "")
+    user_id = payload.get("sub") if payload else None
+    if payload is None or payload.get("type") != "access" or not isinstance(user_id, str):
+        await websocket.close(code=1008)
+        return False
+
+    async with SessionLocal() as session:
+        user = await get_user_by_id(session, user_id)
+        if user is None:
+            await websocket.close(code=1008)
+            return False
+    return True
+
+
 @router.websocket("/ws/cv-notifications")
 async def cv_notifications(websocket: WebSocket):
     await websocket.accept()
+    if not await _authenticate_websocket(websocket):
+        return
     logger.info("WebSocket connected")
 
     r = await get_redis()
@@ -39,7 +63,11 @@ async def cv_notifications(websocket: WebSocket):
         while True:
             message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=30)
             if message and message["type"] == "message":
-                data = json.loads(message["data"])
+                try:
+                    data = json.loads(message["data"])
+                except json.JSONDecodeError:
+                    logger.warning("Invalid Redis notification payload")
+                    continue
                 await websocket.send_json(data)
             else:
                 try:
@@ -48,10 +76,15 @@ async def cv_notifications(websocket: WebSocket):
                     break
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected")
-    except Exception as e:
-        logger.error(f"WebSocket error: {e}")
+    except Exception:
+        logger.exception("WebSocket error")
     finally:
         await pubsub.unsubscribe("cv:notifications")
+        close_func = getattr(pubsub, "aclose", None) or getattr(pubsub, "close", None)
+        if close_func:
+            result = close_func()
+            if inspect.isawaitable(result):
+                await result
 
 
 @router.websocket("/ws/interview/{session_id}")
@@ -60,7 +93,7 @@ async def interview_chat(websocket: WebSocket, session_id: str):
     _webrtc_sessions[session_id] = {"ws": websocket}
     logger.info("Interview WebSocket connected", extra={"session_id": session_id})
 
-    async for db_session in get_db_session():
+    async with SessionLocal() as db_session:
         stmt = select(InterviewSessionModel).where(InterviewSessionModel.id == session_id)
         result = await db_session.execute(stmt)
         interview = result.scalar_one_or_none()
@@ -136,7 +169,7 @@ async def interview_chat(websocket: WebSocket, session_id: str):
                     skill = data.get("skill", "general")
 
                     try:
-                        audio_bytes = base64.b64decode(audio_b64)
+                        audio_bytes = base64.b64decode(audio_b64, validate=True)
                         result = await voice_svc.process_audio(
                             audio_data=audio_bytes,
                             session_id=session_id,
@@ -154,9 +187,9 @@ async def interview_chat(websocket: WebSocket, session_id: str):
                         if result.get("audio"):
                             resp["audio"] = base64.b64encode(result["audio"]).decode("utf-8")
                         await websocket.send_json(resp)
-                    except Exception as e:
-                        logger.error(f"Voice answer processing failed: {e}")
-                        await websocket.send_json({"type": "error", "message": f"Voice processing failed: {str(e)}"})
+                    except Exception:
+                        logger.exception("Voice answer processing failed")
+                        await websocket.send_json({"type": "error", "message": "Voice processing failed"})
                     continue
 
                 if msg_type != "answer":
@@ -186,9 +219,9 @@ async def interview_chat(websocket: WebSocket, session_id: str):
                     result = await svc.submit_answer(
                         db_session, session_id, question_id, answer_text,
                     )
-                except Exception as e:
-                    logger.error(f"Answer evaluation failed: {e}")
-                    await websocket.send_json({"type": "error", "message": f"Evaluation failed: {str(e)}"})
+                except Exception:
+                    logger.exception("Answer evaluation failed")
+                    await websocket.send_json({"type": "error", "message": "Evaluation failed"})
                     continue
 
                 await websocket.send_json({
@@ -232,10 +265,10 @@ async def interview_chat(websocket: WebSocket, session_id: str):
 
         except WebSocketDisconnect:
             logger.info("Interview WebSocket disconnected", extra={"session_id": session_id})
-        except Exception as e:
-            logger.error(f"Interview WebSocket error: {e}", extra={"session_id": session_id})
+        except Exception:
+            logger.exception("Interview WebSocket error", extra={"session_id": session_id})
             try:
-                await websocket.send_json({"type": "error", "message": f"Server error: {str(e)}"})
+                await websocket.send_json({"type": "error", "message": "Server error"})
             except Exception:
                 pass
         finally:

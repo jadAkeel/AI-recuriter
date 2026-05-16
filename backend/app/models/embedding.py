@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from sqlalchemy import JSON, String
+from sqlalchemy import JSON, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.config import settings
@@ -25,6 +25,7 @@ if not _USE_VECTOR and Vector is not None:
 
 class Embedding(Base):
     __tablename__ = "embeddings"
+    __table_args__ = (UniqueConstraint("entity_type", "entity_id", name="uq_embeddings_entity"),)
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     entity_type: Mapped[str] = mapped_column(String(50), index=True)

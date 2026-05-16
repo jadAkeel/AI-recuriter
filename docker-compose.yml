@@ -8,7 +8,7 @@ services:
       - DATABASE_URL=${DATABASE_URL:-sqlite+aiosqlite:///./app.db}
       - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-hash}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
-      - EMBEDDING_DIMENSION=${EMBEDDING_DIMENSION:-768}
+      - EMBEDDING_DIMENSION=${EMBEDDING_DIMENSION:-384}
       - LLM_PROVIDER=${LLM_PROVIDER:-ollama}
       - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.2}
       - OLLAMA_INTERVIEW_MODEL=${OLLAMA_INTERVIEW_MODEL:-gemma3:4b}
@@ -17,19 +17,41 @@ services:
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - ENVIRONMENT=${ENVIRONMENT:-development}
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-super-secret-key-change-in-production}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-dev-only-change-me-at-least-32-chars}
       - APP_BASE_URL=${APP_BASE_URL:-http://localhost:5173}
+      - TRUSTED_HOSTS_STR=${TRUSTED_HOSTS_STR:-localhost,127.0.0.1,testserver}
+      - ESCO_API_ENABLED=${ESCO_API_ENABLED:-false}
+      - RUN_MIGRATIONS=${RUN_MIGRATIONS:-true}
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
+    volumes:
+      - api_uploads:/app/uploads
+      - api_temp_audio:/app/temp_audio
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
 
 volumes:
   redis_data:
+  api_uploads:
+  api_temp_audio:

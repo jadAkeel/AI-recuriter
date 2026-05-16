@@ -111,8 +111,12 @@ async def query_knowledge(
     result = await session.execute(stmt)
     documents = result.scalars().all()
 
-    embedder = get_embedding_service()
-    query_emb = (await embedder.embed([query]))[0]
+    try:
+        embedder = get_embedding_service()
+        query_emb = (await embedder.embed([query]))[0]
+    except Exception:
+        logger.warning("Knowledge query embedding failed")
+        return QueryResponse(query=query, results=[])
 
     import numpy as np
     query_np = np.array(query_emb)

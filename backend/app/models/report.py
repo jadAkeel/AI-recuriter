@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import JSON, Float, String, Text
+from sqlalchemy import JSON, Float, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
@@ -8,6 +8,7 @@ from app.models.base import Base
 
 class Report(Base):
     __tablename__ = "reports"
+    __table_args__ = (UniqueConstraint("job_id", "candidate_id", name="uq_reports_job_candidate"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     job_id: Mapped[str] = mapped_column(String(36), index=True)

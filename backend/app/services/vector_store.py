@@ -7,9 +7,9 @@ import numpy as np
 from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import settings
-from app.core.db import engine
+from app.core import db
 from app.models.embedding import Embedding
+from app.services.embedding import validate_embedding_vector
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 class VectorStore:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
-        self.is_postgres = engine.dialect.name == "postgresql"
+        self.is_postgres = db.engine.dialect.name == "postgresql"
 
     async def upsert_embedding(
         self,
@@ -57,6 +57,8 @@ class VectorStore:
         top_k: int = 5,
     ) -> list[tuple[str, float]]:
         self._validate_embedding_dimension(embedding)
+        if np.linalg.norm(np.array(embedding, dtype=np.float32)) == 0:
+            return []
         if self.is_postgres:
             return await self._query_postgres(entity_type, embedding, top_k)
 
@@ -106,19 +108,27 @@ class VectorStore:
         if query_norm == 0:
             return []
 
-        vectors = np.array([row[1] for row in rows], dtype=np.float32)
+        valid_rows = []
+        valid_embeddings = []
+        for row in rows:
+            try:
+                self._validate_embedding_dimension(row[1])
+            except ValueError:
+                logger.warning("Skipping stored embedding with invalid dimension", extra={"entity_id": row[0]})
+                continue
+            valid_rows.append(row)
+            valid_embeddings.append(row[1])
+        if not valid_rows:
+            return []
+
+        vectors = np.array(valid_embeddings, dtype=np.float32)
         norms = np.linalg.norm(vectors, axis=1)
         norms[norms == 0] = 1.0
 
         scores = np.dot(vectors, query) / (query_norm * norms)
 
         top_indices = np.argsort(scores)[-top_k:][::-1]
-        return [(rows[i][0], float(scores[i])) for i in top_indices]
+        return [(valid_rows[i][0], float(scores[i])) for i in top_indices]
 
     def _validate_embedding_dimension(self, embedding: list[float]) -> None:
-        if self.is_postgres and len(embedding) != settings.embedding_dimension:
-            raise ValueError(
-                "Embedding dimension mismatch: "
-                f"got {len(embedding)}, expected {settings.embedding_dimension}. "
-                "Set EMBEDDING_DIMENSION to match the configured embedding model."
-            )
+        validate_embedding_vector(embedding)

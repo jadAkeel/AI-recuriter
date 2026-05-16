@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import require_any_role
 from app.core.db import get_db_session
+from app.core.config import settings
 from app.models.embedding import Embedding
 from app.models.interview import InterviewSession
 from app.models.job import Job
@@ -54,21 +55,22 @@ async def create_job(
         profile = parse_job_description(request.description)
         job_id = str(uuid.uuid4())
 
-        try:
-            esco = await get_esco_extractor()
-            esco_result = await esco.extract_skills(request.description, top_k=25)
-            esco_skill_names = {m.skill.title.lower() for m in esco_result.skills}
-            existing_required = set(s.lower() for s in profile.required_skills)
-            existing_optional = set(s.lower() for s in profile.optional_skills)
-            new_from_esco = [
-                s for s in esco_skill_names
-                if s not in existing_required and s not in existing_optional
-            ]
-            if new_from_esco:
-                profile.required_skills.extend(sorted(new_from_esco))
-                logger.info("ESCO enriched job with %d new skills", len(new_from_esco))
-        except Exception:
-            logger.warning("ESCO enrichment skipped for job (not available)")
+        if settings.esco_api_enabled:
+            try:
+                esco = await get_esco_extractor()
+                esco_result = await esco.extract_skills(request.description, top_k=25)
+                esco_skill_names = {m.skill.title.lower() for m in esco_result.skills}
+                existing_required = set(s.lower() for s in profile.required_skills)
+                existing_optional = set(s.lower() for s in profile.optional_skills)
+                new_from_esco = [
+                    s for s in esco_skill_names
+                    if s not in existing_required and s not in existing_optional
+                ]
+                if new_from_esco:
+                    profile.required_skills.extend(sorted(new_from_esco))
+                    logger.info("ESCO enriched job with %d new skills", len(new_from_esco))
+            except Exception:
+                logger.warning("ESCO enrichment skipped for job (not available)")
 
         job = Job(
             id=job_id,

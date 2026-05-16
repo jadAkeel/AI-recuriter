@@ -18,7 +18,7 @@ except ImportError:
     sys.exit(1)
 
 
-OUTPUT_DIR = Path(__file__).parent / "cvs_to_upload"
+OUTPUT_DIR = Path(__file__).resolve().parents[1] / "cvs_to_upload"
 MAX_CVS = 100
 
 CS_SKILLS = [

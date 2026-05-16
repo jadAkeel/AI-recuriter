@@ -46,10 +46,32 @@ SECTION_HEADERS = {
         r"^(summary|objective|profile|about me|professional summary)\b",
         re.IGNORECASE,
     ),
+    "languages": re.compile(
+        r"^(languages|language proficiency)\b",
+        re.IGNORECASE,
+    ),
+    "other": re.compile(
+        r"^(certifications|certificates|awards|publications|references|contact)\b",
+        re.IGNORECASE,
+    ),
 }
 
 EMAIL_PATTERN = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 PHONE_PATTERN = re.compile(r"(\+?\d[\d\s\-().]{8,}\d)")
+LOCATION_PATTERN = re.compile(r"^(?:location|address)\s*[:\-]\s*(.+)$", re.IGNORECASE | re.MULTILINE)
+LANGUAGE_WORDS = {
+    "arabic",
+    "english",
+    "french",
+    "spanish",
+    "german",
+    "italian",
+    "portuguese",
+    "turkish",
+    "russian",
+    "mandarin",
+    "chinese",
+}
 
 NEGATION_INDICATORS = [
     "don't know",
@@ -90,21 +112,35 @@ class EnhancedCVParser:
     def extract_text(self, file_name: str, content: bytes) -> str:
         extension = Path(file_name).suffix.lower()
         if extension == ".pdf":
-            return self._extract_pdf_text(content)
-        if extension in {".docx", ".doc"}:
-            return self._extract_docx_text(content)
+            return self._ensure_parseable_text(self._extract_pdf_text(content))
+        if extension == ".docx":
+            return self._ensure_parseable_text(self._extract_docx_text(content))
+        if extension == ".doc":
+            raise ValueError("Legacy .doc files are not supported safely. Please upload PDF, DOCX, or TXT.")
         if extension in {".txt", ""}:
-            return content.decode(errors="ignore")
+            return self._ensure_parseable_text(content.decode(errors="ignore"))
         raise ValueError(f"Unsupported file type: {extension}")
 
     def _extract_pdf_text(self, content: bytes) -> str:
-        with pdfplumber.open(io.BytesIO(content)) as pdf:
-            pages = [page.extract_text() or "" for page in pdf.pages]
-        return "\n".join(pages)
+        try:
+            with pdfplumber.open(io.BytesIO(content)) as pdf:
+                pages = [page.extract_text() or "" for page in pdf.pages]
+            return "\n".join(pages)
+        except Exception as exc:
+            raise ValueError("Could not safely extract text from PDF") from exc
 
     def _extract_docx_text(self, content: bytes) -> str:
-        document = Document(io.BytesIO(content))
-        return "\n".join(paragraph.text for paragraph in document.paragraphs)
+        try:
+            document = Document(io.BytesIO(content))
+            return "\n".join(paragraph.text for paragraph in document.paragraphs)
+        except Exception as exc:
+            raise ValueError("Could not safely extract text from DOCX") from exc
+
+    def _ensure_parseable_text(self, text: str) -> str:
+        cleaned = str(text or "").strip()
+        if sum(1 for char in cleaned if char.isalnum()) < 10:
+            raise ValueError("CV text is empty or too short to parse reliably")
+        return cleaned
 
     ARABIC_NORMALIZE_MAP = str.maketrans({
         "إ": "ا", "أ": "ا", "آ": "ا", "ى": "ي", "ة": "ه", "ؤ": "و", "ئ": "ي",
@@ -143,6 +179,21 @@ class EnhancedCVParser:
         match = PHONE_PATTERN.search(text)
         return match.group(0) if match else None
 
+    def _extract_location(self, text: str) -> str | None:
+        match = LOCATION_PATTERN.search(text)
+        if match:
+            return match.group(1).strip()[:120]
+        return None
+
+    def _extract_languages(self, text: str, sections: dict[str, list[str]]) -> list[str]:
+        candidates: set[str] = set()
+        language_text = " ".join(sections.get("languages", []))
+        searchable = self._normalize_text(language_text or text)
+        for language in LANGUAGE_WORDS:
+            if re.search(r"\b" + re.escape(language) + r"\b", searchable):
+                candidates.add(language)
+        return sorted(candidates)
+
     def _extract_sections(self, text: str) -> dict[str, list[str]]:
         lines = [line.strip() for line in text.splitlines()]
         sections: dict[str, list[str]] = {
@@ -151,6 +202,7 @@ class EnhancedCVParser:
             "projects": [],
             "skills": [],
             "summary": [],
+            "languages": [],
         }
         current_section: str | None = None
 
@@ -314,10 +366,18 @@ class EnhancedCVParser:
                 return self._extract_skills_rule_based(self._normalize_text(text), text)
 
             skills_found: list[SkillDetail] = []
-            negative_skills = self._normalize_llm_list(analysis.get("negative_skills", []))
-            learning_skills = self._normalize_llm_list(analysis.get("learning_skills", []))
+            negative_skills = self._grounded_llm_list(analysis.get("negative_skills", []), text)
+            learning_skills = self._grounded_llm_list(analysis.get("learning_skills", []), text)
 
             for skill_data in raw_skills:
+                if not isinstance(skill_data, dict):
+                    continue
+                if not self._llm_skill_is_grounded(skill_data, text):
+                    logger.warning(
+                        "Discarded ungrounded LLM CV skill",
+                        extra={"skill": str(skill_data.get("skill", ""))[:80]},
+                    )
+                    continue
                 status_map = {
                     "has_experience": SkillStatus.HAS_EXPERIENCE,
                     "learning": SkillStatus.LEARNING,
@@ -340,14 +400,20 @@ class EnhancedCVParser:
                 )
                 skills_found.append(skill_detail)
 
+            if not skills_found:
+                logger.warning("LLM returned no grounded skills, falling back to rule-based")
+                return self._extract_skills_rule_based(self._normalize_text(text), text)
+
             return skills_found, negative_skills, learning_skills
 
         except Exception as e:
-            logger.error(f"LLM skill extraction failed: {e}")
+            logger.error("LLM skill extraction failed", extra={"error_type": type(e).__name__})
             return self._extract_skills_rule_based(self._normalize_text(text), text)
 
     @staticmethod
     def _normalize_llm_list(items: list[Any]) -> list[str]:
+        if not isinstance(items, list):
+            return []
         normalized: list[str] = []
         for item in items:
             if isinstance(item, str):
@@ -357,6 +423,40 @@ class EnhancedCVParser:
                 if name:
                     normalized.append(str(name))
         return normalized
+
+    def _grounded_llm_list(self, items: list[Any], text: str) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for skill in self._normalize_llm_list(items):
+            skill_name = " ".join(skill.lower().strip().split())
+            if not skill_name or skill_name in seen:
+                continue
+            if self._skill_name_is_grounded(skill_name, text):
+                seen.add(skill_name)
+                normalized.append(skill_name)
+        return normalized[:100]
+
+    def _llm_skill_is_grounded(self, skill_data: dict[str, Any], text: str) -> bool:
+        skill_name = str(skill_data.get("skill") or skill_data.get("name") or "").strip().lower()
+        if not skill_name:
+            return False
+        if self._skill_name_is_grounded(skill_name, text):
+            return True
+        context = str(skill_data.get("context") or "").strip()
+        if not context:
+            return False
+        normalized_text = self._normalize_text(text)
+        normalized_context = self._normalize_text(context)
+        return bool(normalized_context and normalized_context in normalized_text and skill_name in normalized_context)
+
+    def _skill_name_is_grounded(self, skill_name: str, text: str) -> bool:
+        normalized_text = self._normalize_text(text)
+        normalized_skill = " ".join(skill_name.lower().strip().split())
+        if not normalized_skill:
+            return False
+        if normalized_skill in SKILL_KEYWORDS:
+            return skill_in_text(normalized_skill, normalized_text)
+        return bool(re.search(r"\b" + re.escape(normalized_skill) + r"\b", normalized_text))
 
     def _parse_experience_entries(self, experience_lines: list[str]) -> list[ExperienceEntry]:
         entries: list[ExperienceEntry] = []
@@ -525,6 +625,8 @@ class EnhancedCVParser:
         full_name = self._extract_name(text)
         email = self._extract_email(text)
         phone = self._extract_phone(text)
+        location = self._extract_location(text)
+        languages = self._extract_languages(text, sections)
 
         skills = [s.name for s in skills_detailed if s.status not in {SkillStatus.NO_EXPERIENCE, SkillStatus.LEARNING}]
 
@@ -544,6 +646,7 @@ class EnhancedCVParser:
             full_name=full_name,
             email=email,
             phone=phone,
+            location=location,
             skills=skills,
             skills_detailed=skills_detailed,
             experience=sections.get("experience", []),
@@ -553,6 +656,7 @@ class EnhancedCVParser:
             education_entries=education_entries,
             highest_degree=highest_degree,
             projects=sections.get("projects", []),
+            languages=languages,
             negative_skills=negative_skills,
             learning_skills=learning_skills,
             summary=summary,
@@ -573,6 +677,7 @@ class EnhancedCVParser:
         return profile
 
     async def parse_async(self, text: str) -> CandidateProfile:
+        text = self._ensure_parseable_text(text)
         normalized = self._normalize_text(text)
         if self.use_llm and self._get_llm_service():
             skills_detailed, negative_skills, learning_skills = await self._extract_skills_with_llm(text)
@@ -582,6 +687,7 @@ class EnhancedCVParser:
         return self._build_profile(text, skills_detailed, negative_skills, learning_skills)
 
     def parse(self, text: str) -> CandidateProfile:
+        text = self._ensure_parseable_text(text)
         normalized = self._normalize_text(text)
         if not self.use_llm:
             skills_detailed, negative_skills, learning_skills = self._extract_skills_rule_based(normalized, text)

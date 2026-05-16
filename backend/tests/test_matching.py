@@ -165,3 +165,5 @@ def test_matching_api_returns_candidate_details() -> None:
     assert first["candidate_name"] == "Visible Candidate"
     assert first["candidate_email"] == "visible@example.com"
     assert "python" in first["candidate_skills"]
+    assert first["reasoning"]["scoring_formula"]
+    assert first["reasoning"]["score_contributions"]

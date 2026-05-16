@@ -3,8 +3,12 @@ import type { InternalAxiosRequestConfig } from 'axios';
 
 type RetriableRequestConfig = InternalAxiosRequestConfig & { _retry?: boolean };
 
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api/v1';
+let refreshPromise: Promise<string> | null = null;
+
 const api = axios.create({
-  baseURL: '/api/v1',
+  baseURL: API_BASE_URL,
+  timeout: 60_000,
 });
 
 api.interceptors.request.use((config) => {
@@ -21,13 +25,23 @@ api.interceptors.response.use(
     const originalRequest = error.config as RetriableRequestConfig | undefined;
     if (error.response?.status === 401 && originalRequest && !originalRequest._retry) {
       originalRequest._retry = true;
-      const refresh = localStorage.getItem('refresh_token');
-      if (refresh) {
+      const refreshToken = localStorage.getItem('refresh_token');
+      if (refreshToken) {
         try {
-          const { data } = await axios.post('/api/v1/auth/refresh', { refresh_token: refresh });
-          localStorage.setItem('access_token', data.access_token);
-          localStorage.setItem('refresh_token', data.refresh_token);
-          originalRequest.headers.Authorization = `Bearer ${data.access_token}`;
+          if (!refreshPromise) {
+            refreshPromise = axios
+              .post(`${API_BASE_URL}/auth/refresh`, { refresh_token: refreshToken })
+              .then(({ data }) => {
+                localStorage.setItem('access_token', data.access_token);
+                localStorage.setItem('refresh_token', data.refresh_token);
+                return data.access_token as string;
+              })
+              .finally(() => {
+                refreshPromise = null;
+              });
+          }
+          const accessToken = await refreshPromise;
+          originalRequest.headers.Authorization = `Bearer ${accessToken}`;
           return api(originalRequest);
         } catch {
           localStorage.clear();

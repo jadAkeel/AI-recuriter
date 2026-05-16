@@ -13,14 +13,17 @@ logger = logging.getLogger(__name__)
 
 def _create_engine() -> AsyncEngine:
     url = str(settings.database_url)
+    connect_args = {}
     # Enable WAL mode for SQLite to allow concurrent reads during writes
     if url.startswith("sqlite"):
         separator = "&" if "?" in url else "?"
         url += f"{separator}journal_mode=wal&timeout=10000"
+        connect_args["timeout"] = 10
     return create_async_engine(
         url,
         echo=False,
         pool_pre_ping=True,
+        connect_args=connect_args,
     )
 
 
@@ -67,6 +70,9 @@ async def init_db() -> None:
     import app.models.user  # noqa: F401
 
     async with engine.begin() as connection:
+        if engine.dialect.name == "sqlite":
+            await connection.execute(text("PRAGMA journal_mode=WAL"))
+            await connection.execute(text("PRAGMA foreign_keys=ON"))
         if engine.dialect.name == "postgresql":
             await connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         await connection.run_sync(Base.metadata.create_all)

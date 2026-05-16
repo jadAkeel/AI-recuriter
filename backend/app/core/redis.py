@@ -59,5 +59,9 @@ async def cache_delete(key: str) -> None:
 async def close_redis() -> None:
     global _redis
     if _redis:
-        await _redis.close()
+        close_func = getattr(_redis, "aclose", None) or getattr(_redis, "close", None)
+        if close_func:
+            result = close_func()
+            if hasattr(result, "__await__"):
+                await result
         _redis = None

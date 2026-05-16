@@ -138,6 +138,168 @@ export default function Matching() {
     return { label: 'Weak', color: 'text-red-600 bg-red-50 border-red-200' };
   };
 
+  const formatPct = (value?: number | null) => `${Math.round((value ?? 0) * 100)}%`;
+
+  const factorLabel = (key: string) => {
+    const labels: Record<string, string> = {
+      skill_required: 'Required skills',
+      skill_optional: 'Optional skills',
+      semantic: 'Semantic fit',
+      experience: 'Experience',
+      seniority: 'Seniority',
+      seniority_match: 'Seniority',
+      cross_encoder: 'LLM deep rerank',
+      base_hybrid: 'Base hybrid score',
+      missing_required: 'Missing required penalty',
+    };
+    return labels[key] || key.replace(/_/g, ' ');
+  };
+
+  const modelLabel = (model?: string) => {
+    if (!model) return 'Hybrid matching';
+    return model.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+  };
+
+  const getScoreWeight = (reasoning: MatchResult['reasoning'], key: string) => {
+    const fallback: Record<string, number> = {
+      skill_required: 0.35,
+      skill_optional: 0.15,
+      semantic: 0.20,
+      experience: 0.15,
+      seniority_match: 0.10,
+      cross_encoder: 0.60,
+      base_hybrid: 0.40,
+    };
+    return reasoning?.score_weights?.[key] ?? fallback[key];
+  };
+
+  const getRawFactorScore = (reasoning: MatchResult['reasoning'], key: string) => {
+    const breakdown = reasoning?.score_breakdown || {};
+    const breakdownKey = key === 'seniority_match' ? 'seniority' : key;
+    if (breakdown[breakdownKey] !== undefined) return breakdown[breakdownKey];
+    if (key === 'skill_required') return reasoning?.required_score;
+    if (key === 'skill_optional') return reasoning?.optional_score;
+    if (key === 'semantic') return reasoning?.semantic_score;
+    if (key === 'experience') return reasoning?.years_score;
+    if (key === 'cross_encoder') return reasoning?.cross_encoder_score ?? undefined;
+    if (key === 'base_hybrid') return reasoning?.final_score;
+    return undefined;
+  };
+
+  const getScoreContributions = (reasoning: MatchResult['reasoning']) => {
+    if (reasoning?.score_contributions && Object.keys(reasoning.score_contributions).length > 0) {
+      return reasoning.score_contributions;
+    }
+    const breakdown = reasoning?.score_breakdown || {};
+    return {
+      skill_required: 0.35 * (reasoning?.required_score ?? breakdown.skill_required ?? 0),
+      skill_optional: 0.15 * (reasoning?.optional_score ?? breakdown.skill_optional ?? 0),
+      semantic: 0.20 * (reasoning?.semantic_score ?? breakdown.semantic ?? 0),
+      experience: 0.15 * (reasoning?.years_score ?? breakdown.experience ?? 0),
+      seniority_match: 0.10 * (breakdown.seniority ?? 0),
+    };
+  };
+
+  const renderRankingBasis = (match: MatchResult, compact = false) => {
+    const reasoning = match.reasoning;
+    const contributions = Object.entries(getScoreContributions(reasoning)).filter(([, value]) => value > 0);
+    const penalties = reasoning?.score_penalties && Object.keys(reasoning.score_penalties).length > 0
+      ? reasoning.score_penalties
+      : reasoning?.missing_penalty
+        ? { missing_required: reasoning.missing_penalty }
+        : {};
+    const penaltyEntries = Object.entries(penalties);
+    const formula = reasoning?.scoring_formula || 'Hybrid score built from skills, semantic fit, experience, seniority, and optional LLM reranking.';
+    const strengths = reasoning?.strengths ?? [];
+    const gaps = reasoning?.gaps ?? [];
+
+    return (
+      <div className={`${compact ? 'bg-white border border-gray-200' : 'bg-indigo-50 border border-indigo-100'} rounded-lg p-3`}>
+        <div className="flex items-start justify-between gap-3 mb-2">
+          <div>
+            <h4 className="text-xs font-semibold text-indigo-800 flex items-center gap-1">
+              <BarChart3 className="w-3 h-3" /> Ranking basis
+            </h4>
+            <p className="text-xs text-indigo-700 mt-1">
+              Sorted by final ATS score. Model: {modelLabel(reasoning?.scoring_model)}.
+            </p>
+          </div>
+          <span className={`text-sm font-bold ${scoreColor(match.score)}`}>{formatPct(match.score)} final</span>
+        </div>
+
+        <p className="text-xs text-gray-600 bg-white/70 border border-white rounded-md p-2 mb-3">{formula}</p>
+
+        {contributions.length > 0 && (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+            {contributions.map(([key, contribution]) => {
+              const rawScore = getRawFactorScore(reasoning, key);
+              const weight = getScoreWeight(reasoning, key);
+              const contributionPct = Math.round(contribution * 100);
+              const width = Math.max(4, Math.min(100, contributionPct));
+              return (
+                <div key={key} className="bg-white rounded-lg border border-gray-100 p-2">
+                  <div className="flex items-center justify-between text-xs mb-1">
+                    <span className="font-medium text-gray-700">{factorLabel(key)}</span>
+                    <span className="font-semibold text-indigo-700">+{contributionPct} pts</span>
+                  </div>
+                  <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                    <div className="h-1.5 bg-indigo-500 rounded-full" style={{ width: `${width}%` }} />
+                  </div>
+                  <div className="flex items-center justify-between text-[11px] text-gray-500 mt-1">
+                    <span>{rawScore !== undefined ? `${formatPct(rawScore)} score` : 'score n/a'}</span>
+                    {weight !== undefined && <span>{formatPct(weight)} weight</span>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {(penaltyEntries.length > 0 || reasoning?.pre_cap_score !== undefined || reasoning?.score_cap !== undefined) && (
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mt-3 text-xs">
+            {reasoning?.pre_cap_score !== undefined && (
+              <div className="bg-white rounded-lg border border-gray-100 p-2">
+                <span className="text-gray-500">Before cap</span>
+                <strong className="block text-gray-800">{formatPct(reasoning.pre_cap_score)}</strong>
+              </div>
+            )}
+            {penaltyEntries.map(([key, value]) => (
+              <div key={key} className="bg-red-50 rounded-lg border border-red-100 p-2">
+                <span className="text-red-500">{factorLabel(key)}</span>
+                <strong className="block text-red-600">-{formatPct(value)}</strong>
+              </div>
+            ))}
+            {reasoning?.score_cap !== undefined && (
+              <div className="bg-white rounded-lg border border-gray-100 p-2">
+                <span className="text-gray-500">Required-skill cap</span>
+                <strong className="block text-gray-800">{formatPct(reasoning.score_cap)}</strong>
+              </div>
+            )}
+          </div>
+        )}
+
+        {reasoning?.score_cap_reason && (
+          <p className="text-[11px] text-gray-500 mt-2">{reasoning.score_cap_reason}</p>
+        )}
+
+        {(strengths.length > 0 || gaps.length > 0) && (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mt-3 text-xs">
+            {strengths.length > 0 && (
+              <div className="bg-green-50 rounded-lg p-2 text-green-700">
+                <span className="font-semibold">Strengths:</span> {strengths.join(', ')}
+              </div>
+            )}
+            {gaps.length > 0 && (
+              <div className="bg-red-50 rounded-lg p-2 text-red-600">
+                <span className="font-semibold">Gaps:</span> {gaps.join(', ')}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const rankBadge = (rank: number) => {
     const colors = ['bg-yellow-400 text-yellow-900', 'bg-gray-300 text-gray-700', 'bg-orange-300 text-orange-800'];
     const color = rank <= 3 ? colors[rank - 1] : 'bg-gray-100 text-gray-500';
@@ -488,13 +650,15 @@ export default function Matching() {
                 >
                   <span className="flex items-center gap-1">
                     <Brain className="w-3 h-3" />
-                    {isExpanded ? 'Hide' : 'Show'} technical analysis
+                    {isExpanded ? 'Hide' : 'Show'} ranking basis
                   </span>
                   {isExpanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
                 </button>
 
                 {isExpanded && (
                   <div className="px-4 pb-4 pt-2 space-y-3 border-t border-gray-50">
+                    {renderRankingBasis(r)}
+
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                       <div className="bg-gray-50 rounded-lg p-3">
                         <h4 className="text-xs font-semibold text-gray-700 mb-2 flex items-center gap-1">
@@ -535,7 +699,7 @@ export default function Matching() {
                           </div>
                           <span className={`text-sm font-bold ${scoreColor(r.score)}`}>{pct}%</span>
                         </div>
-                        <p className="text-xs text-gray-500 mt-1">Two-phase scoring: cross-encoder (top 20) + skill pre-filter</p>
+                        <p className="text-xs text-gray-500 mt-1">Weighted scoring from the ranking basis above</p>
                       </div>
 
                       <div className="bg-gray-50 rounded-lg p-3">
@@ -658,6 +822,7 @@ export default function Matching() {
                   </div>
                 </div>
               )}
+              {previewCandidate.match && renderRankingBasis(previewCandidate.match, true)}
               <div>
                 <h3 className="text-sm font-semibold text-gray-700 mb-2">Skills</h3>
                 <div className="flex gap-1.5 flex-wrap">

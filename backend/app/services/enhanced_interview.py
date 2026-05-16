@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import random
 import uuid
 from datetime import datetime
 from typing import Any
@@ -15,8 +14,7 @@ from app.models.job import Job
 from app.schemas.interview import QuestionItem
 from app.services.bilingual_llm import get_bilingual_llm_service
 from app.services.interview import (
-    GENERAL_QUESTIONS,
-    _get_questions_for_skill,
+    build_grounded_question_items,
 )
 from app.services.skill_catalog import SKILL_CATEGORIES
 
@@ -109,66 +107,15 @@ class EnhancedInterviewService:
         if job is None:
             raise ValueError("Job not found")
 
-        job_seniority = job.seniority or "mid"
-
-        # Build candidate skill level map from detailed parsing
-        candidate_skill_levels: dict[str, str] = {}
-        if candidate.skills_detailed:
-            for sd in candidate.skills_detailed:
-                if isinstance(sd, dict):
-                    name = sd.get("name", "").lower()
-                    level = sd.get("level", "mid")
-                    if name:
-                        candidate_skill_levels[name] = level
-
-        all_skills = list(set(candidate.skills + job.required_skills))
-        required_set = set(s.lower() for s in (job.required_skills or []))
-
-        questions: list[QuestionItem] = []
-        seen_questions: set[str] = set()
-
-        for skill in all_skills:
-            # Determine difficulty: job-required skills use job seniority,
-            # candidate's own skills use their detected level (or job seniority as fallback)
-            skill_lower = skill.lower()
-            if skill_lower in required_set:
-                difficulty_level = job_seniority
-            else:
-                difficulty_level = candidate_skill_levels.get(skill_lower, job_seniority)
-
-            skill_qs = _get_questions_for_skill(skill, difficulty_level)
-            for q in skill_qs:
-                if q["question"] not in seen_questions:
-                    category = _skill_to_category(skill)
-                    difficulty = q.get("difficulty", difficulty_level)
-                    questions.append(QuestionItem(
-                        id=str(uuid.uuid4()),
-                        skill=skill,
-                        question=q["question"],
-                        difficulty=difficulty,
-                        category=category,
-                        expected_answer_hint=_get_hint_for_skill(skill, difficulty),
-                        evaluation_criteria=_get_evaluation_criteria(skill),
-                        tags=_get_tags(skill),
-                    ))
-                    seen_questions.add(q["question"])
-
-        random.shuffle(questions)
-        questions = questions[:8]
-
-        if len(questions) < 3:
-            remaining = 5 - len(questions)
-            for q in GENERAL_QUESTIONS[:remaining]:
-                questions.append(QuestionItem(
-                    id=str(uuid.uuid4()),
-                    skill="general",
-                    question=q["question"],
-                    difficulty=q.get("difficulty", job_seniority),
-                    category="Behavioral",
-                    expected_answer_hint="Provide a specific example from your experience.",
-                    evaluation_criteria=["Relevance of example", "Communication clarity", "Self-awareness"],
-                    tags=["behavioral", "soft-skills"],
-                ))
+        questions = build_grounded_question_items(candidate, job, limit=8)
+        for question in questions:
+            question.category = _skill_to_category(question.skill)
+            question.expected_answer_hint = question.expected_answer_hint or _get_hint_for_skill(
+                question.skill,
+                question.difficulty,
+            )
+            question.evaluation_criteria = question.evaluation_criteria or _get_evaluation_criteria(question.skill)
+            question.tags = sorted(set(question.tags + _get_tags(question.skill)))
 
         return questions, candidate, job
 
@@ -214,16 +161,17 @@ class EnhancedInterviewService:
                 skill=skill,
                 difficulty=difficulty,
             )
+            score = max(0.0, min(1.0, float(evaluation.get("score", 0.5))))
 
             return {
-                "score": evaluation.get("score", 0.5),
+                "score": score,
                 "feedback": evaluation.get("feedback", "Evaluation complete"),
                 "language_detected": evaluation.get("language_detected", "english"),
                 "strengths": evaluation.get("strengths", []),
                 "weaknesses": evaluation.get("weaknesses", []),
-                "technical_accuracy": evaluation.get("technical_accuracy", 0.5),
-                "completeness": evaluation.get("completeness", 0.5),
-                "clarity": evaluation.get("clarity", 0.5),
+                "technical_accuracy": max(0.0, min(1.0, float(evaluation.get("technical_accuracy", 0.5)))),
+                "completeness": max(0.0, min(1.0, float(evaluation.get("completeness", 0.5)))),
+                "clarity": max(0.0, min(1.0, float(evaluation.get("clarity", 0.5)))),
                 "using_llm": True,
             }
         except Exception as e:
@@ -359,6 +307,13 @@ class EnhancedInterviewService:
         if question_item is None:
             raise ValueError("Question not found")
 
+        answers = list(interview.answers or [])
+        if len(answers) >= len(questions):
+            raise ValueError("Interview already completed")
+        expected_question = questions[len(answers)]
+        if expected_question.id != question_id:
+            raise ValueError("Answer does not match the current question")
+
         evaluation = await self.evaluate_answer_with_llm(
             question=question_item.question,
             answer=answer,
@@ -366,7 +321,6 @@ class EnhancedInterviewService:
             difficulty=question_item.difficulty,
         )
 
-        answers = list(interview.answers or [])
         evaluations = list(interview.evaluations or [])
         chat_history = list(interview.chat_history or [])
 

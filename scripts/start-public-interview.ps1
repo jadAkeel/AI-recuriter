@@ -1,5 +1,5 @@
 param(
-    [string]$GmailAddress = "jadakeel05@gmail.com",
+    [string]$GmailAddress = "",
     [string]$GmailAppPassword = "",
     [int]$FrontendPort = 5173,
     [int]$BackendPort = 8000

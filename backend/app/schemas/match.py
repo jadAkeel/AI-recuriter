@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class MatchItem(BaseModel):
     candidate_id: str
     candidate_name: str | None = None
     candidate_email: str | None = None
-    candidate_skills: list[str] = []
+    candidate_skills: list[str] = Field(default_factory=list)
     candidate_total_years_experience: float | None = None
     score: float
     reasoning: dict

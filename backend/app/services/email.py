@@ -6,7 +6,6 @@ import logging
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from typing import Any
 
 from app.core.config import settings
 
@@ -105,33 +104,37 @@ async def send_interview_results(
     strengths: list[str],
     weaknesses: list[str],
 ) -> bool:
+    safe_candidate_name = html.escape(candidate_name or "Candidate")
+    safe_job_title = html.escape(job_title or "Position")
+    safe_strengths = [html.escape(item) for item in strengths[:10]]
+    safe_weaknesses = [html.escape(item) for item in weaknesses[:10]]
     subject = f"Interview Results: {job_title}"
 
     score_pct = f"{overall_score * 100:.1f}%"
-    html = f"""<!DOCTYPE html>
+    html_body = f"""<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"></head>
 <body style="font-family: Arial, sans-serif; background: #f4f7fb; padding: 40px;">
 <div style="max-width: 600px; margin: auto; background: white; border-radius: 12px; padding: 32px;">
-<h2 style="color: #111827;">Hello {candidate_name},</h2>
-<p style="color: #374151;">Your interview for <strong>{job_title}</strong> has been evaluated.</p>
+<h2 style="color: #111827;">Hello {safe_candidate_name},</h2>
+<p style="color: #374151;">Your interview for <strong>{safe_job_title}</strong> has been evaluated.</p>
 <div style="text-align: center; margin: 24px 0; padding: 24px; background: #eff6ff; border-radius: 8px;">
 <p style="font-size: 14px; color: #6b7280;">Overall Score</p>
 <p style="font-size: 36px; font-weight: bold; color: #1a56db;">{score_pct}</p>
 </div>
 <div style="margin: 24px 0;">
 <p style="font-weight: bold; color: #059669;">Strengths</p>
-<ul style="color: #374151;">{''.join(f'<li>{s}</li>' for s in strengths)}</ul>
+<ul style="color: #374151;">{''.join(f'<li>{s}</li>' for s in safe_strengths)}</ul>
 </div>
 <div style="margin: 24px 0;">
 <p style="font-weight: bold; color: #dc2626;">Areas to Improve</p>
-<ul style="color: #374151;">{''.join(f'<li>{w}</li>' for w in weaknesses)}</ul>
+<ul style="color: #374151;">{''.join(f'<li>{w}</li>' for w in safe_weaknesses)}</ul>
 </div>
 </div>
 </body>
 </html>"""
 
     if settings.smtp_host:
-        return await _send_email_smtp(to_email, subject, html)
-    _log_email(to_email, subject, html)
+        return await _send_email_smtp(to_email, subject, html_body)
+    _log_email(to_email, subject, html_body)
     return True

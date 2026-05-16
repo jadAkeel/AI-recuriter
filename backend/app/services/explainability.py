@@ -122,7 +122,15 @@ async def generate_candidate_report(
         similar = await store.query_similar("candidate", job_emb, top_k=20)
         similarity = next((s for cid, s in similar if cid == candidate_id), 0.5)
     else:
-        similarity = match.reasoning.get("similarity", 0.5) if isinstance(match.reasoning, dict) else 0.5
+        if isinstance(match.reasoning, dict):
+            similarity = (
+                match.reasoning.get("similarity")
+                or match.reasoning.get("semantic_score")
+                or match.reasoning.get("final_score")
+                or 0.5
+            )
+        else:
+            similarity = 0.5
 
     skill_data = compute_skill_score(
         job.required_skills, job.optional_skills, candidate.skills,
@@ -149,18 +157,19 @@ async def generate_candidate_report(
     strengths, weaknesses = _generate_strengths_weaknesses(skill_gap, candidate.skills)
     recommendation = _generate_recommendation(score_breakdown, skill_gap)
 
-    report = Report(
-        id=str(uuid.uuid4()),
-        job_id=job_id,
-        candidate_id=candidate_id,
-        overall_score=overall_score,
-        score_breakdown=score_breakdown.model_dump(),
-        skill_gap=skill_gap.model_dump(),
-        strengths=strengths,
-        weaknesses=weaknesses,
-        recommendation=recommendation,
-    )
-    session.add(report)
+    report_stmt = select(Report).where(Report.job_id == job_id, Report.candidate_id == candidate_id)
+    report_result = await session.execute(report_stmt)
+    report = report_result.scalar_one_or_none()
+    if report is None:
+        report = Report(id=str(uuid.uuid4()), job_id=job_id, candidate_id=candidate_id, overall_score=overall_score,
+                        score_breakdown={}, skill_gap={}, strengths=[], weaknesses=[], recommendation="")
+        session.add(report)
+    report.overall_score = overall_score
+    report.score_breakdown = score_breakdown.model_dump()
+    report.skill_gap = skill_gap.model_dump()
+    report.strengths = strengths
+    report.weaknesses = weaknesses
+    report.recommendation = recommendation
     await session.commit()
 
     return CandidateReportResponse(
@@ -192,11 +201,16 @@ async def compare_candidates(
     similar = await store.query_similar("candidate", job_emb, top_k=50)
     sim_map = dict(similar)
 
+    if not candidate_ids:
+        return ComparisonResponse(job_id=job_id, job_title=job.title, candidates=[])
+
+    cand_stmt = select(Candidate).where(Candidate.id.in_(candidate_ids))
+    cand_result = await session.execute(cand_stmt)
+    candidates = {candidate.id: candidate for candidate in cand_result.scalars().all()}
+
     items: list[ComparisonItem] = []
     for cid in candidate_ids:
-        cand_stmt = select(Candidate).where(Candidate.id == cid)
-        cand_result = await session.execute(cand_stmt)
-        candidate = cand_result.scalar_one_or_none()
+        candidate = candidates.get(cid)
         if candidate is None:
             continue
 

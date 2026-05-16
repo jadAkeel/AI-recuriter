@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, File, HTTPException, UploadFile, Query
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, Query
 
+from app.core.config import settings
+from app.core.deps import require_any_role
+from app.models.user import User
 from app.schemas.candidate import CandidateProfile
 from app.services.cv_parser import extract_text
 from app.services.enhanced_cv_parser import (
@@ -15,6 +18,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+async def _read_limited_upload(file: UploadFile) -> bytes:
+    content = await file.read(settings.max_upload_bytes + 1)
+    if len(content) > settings.max_upload_bytes:
+        max_mb = settings.max_upload_bytes // (1024 * 1024)
+        raise ValueError(f"CV file is too large. Maximum size is {max_mb}MB.")
+    return content
+
+
 @router.post("/cv/parse", response_model=CandidateProfile)
 async def parse_cv(
     file: UploadFile = File(...),
@@ -22,9 +33,10 @@ async def parse_cv(
         default=True,
         description="Use LLM (Ollama) for enhanced skill extraction and negation detection",
     ),
+    _: User = Depends(require_any_role("owner", "admin", "recruiter", "candidate")),
 ) -> CandidateProfile:
     try:
-        content = await file.read()
+        content = await _read_limited_upload(file)
         text = extract_text(file.filename or "", content)
 
         if use_llm:
@@ -56,4 +68,4 @@ async def parse_cv(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("CV parsing failed")
-        raise HTTPException(status_code=500, detail=f"CV parsing failed: {str(exc)}") from exc
+        raise HTTPException(status_code=500, detail="CV parsing failed") from exc

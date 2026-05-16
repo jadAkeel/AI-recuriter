@@ -17,7 +17,7 @@ def configure_logging() -> None:
     if _LOG_QUEUE is not None:
         return
 
-    log_level = logging.getLevelName(settings.log_level.upper())
+    log_level = getattr(logging, settings.log_level.upper(), logging.INFO)
     formatter = logging.Formatter(
         fmt="%(asctime)s %(levelname)s %(name)s %(message)s",
         datefmt="%Y-%m-%dT%H:%M:%S%z",

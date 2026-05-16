@@ -7,13 +7,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db_session
 from app.core.deps import require_any_role
+from app.core.config import settings
 from app.models.candidate import Candidate
 from app.models.job import Job
 from app.models.user import User
 from app.schemas.match import MatchItem, MatchResponse
 from app.services.embedding import get_embedding_service
 from app.services.matching import rank_candidates
-from app.services.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,9 @@ async def match_candidates(
     _: User = Depends(require_any_role("owner", "admin", "recruiter")),
     session: AsyncSession = Depends(get_db_session),
 ) -> MatchResponse:
+    if skill_logic not in {"and", "or"}:
+        raise HTTPException(status_code=400, detail="skill_logic must be 'and' or 'or'")
+
     job = await _get_job(session, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -62,9 +65,9 @@ async def match_candidates(
             job_embedding = (await embedder.embed([job.description]))[0]
         except Exception as e:
             logger.error("Job embedding failed, using zero vector", extra={"error": str(e)})
-            job_embedding = [0.0] * 384
+            job_embedding = [0.0] * settings.embedding_dimension
     else:
-        job_embedding = [0.0] * 384  # unused placeholder
+        job_embedding = [0.0] * settings.embedding_dimension  # unused placeholder
 
     matches = await rank_candidates(
         session,

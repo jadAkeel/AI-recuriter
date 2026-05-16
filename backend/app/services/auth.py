@@ -17,12 +17,19 @@ ALGORITHM = "HS256"
 VALID_ROLES = {"candidate", "recruiter", "admin", "owner"}
 
 
+def normalize_email(email: str) -> str:
+    return email.strip().lower()
+
+
 def hash_password(password: str) -> str:
     return pwd_context.hash(password)
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
+    try:
+        return pwd_context.verify(plain, hashed)
+    except Exception:
+        return False
 
 
 def create_access_token(user_id: str, role: str) -> str:
@@ -51,12 +58,14 @@ def create_refresh_token(user_id: str) -> str:
 def decode_token(token: str) -> dict | None:
     try:
         payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[ALGORITHM])
-        return payload
+        return payload if isinstance(payload, dict) else None
     except JWTError:
         return None
 
 
 async def register_user(session: AsyncSession, email: str, password: str, full_name: str) -> User:
+    email = normalize_email(email)
+    full_name = " ".join(full_name.strip().split())
     stmt = select(User).where(User.email == email)
     result = await session.execute(stmt)
     if result.scalar_one_or_none():
@@ -75,7 +84,7 @@ async def register_user(session: AsyncSession, email: str, password: str, full_n
 
 
 async def authenticate_user(session: AsyncSession, email: str, password: str) -> User | None:
-    stmt = select(User).where(User.email == email)
+    stmt = select(User).where(User.email == normalize_email(email))
     result = await session.execute(stmt)
     user = result.scalar_one_or_none()
     if user is None or not verify_password(password, user.password_hash):
@@ -90,7 +99,7 @@ async def get_user_by_id(session: AsyncSession, user_id: str) -> User | None:
 
 
 async def get_user_by_email(session: AsyncSession, email: str) -> User | None:
-    stmt = select(User).where(User.email == email)
+    stmt = select(User).where(User.email == normalize_email(email))
     result = await session.execute(stmt)
     return result.scalar_one_or_none()
 

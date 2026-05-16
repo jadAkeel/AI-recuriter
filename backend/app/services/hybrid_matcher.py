@@ -10,16 +10,14 @@ This module provides a sophisticated matching system that combines:
 from __future__ import annotations
 
 import logging
-import math
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy.ext.asyncio import AsyncSession
-
+from app.core.config import settings
 from app.models.candidate import Candidate
 from app.models.job import Job
 from app.services.esco_service import ESCOSkillService, get_esco_service, NormalizedSkill
-from app.services.embedding import EmbeddingProvider, get_embedding_service
+from app.services.embedding import EmbeddingProvider, get_embedding_service, is_embedding_quality_text, validate_embedding_vector
 from app.services.skill_catalog import SYNONYM_MAP
 from app.services.vector_store import VectorStore
 
@@ -89,7 +87,15 @@ class SkillMatchResult:
 @dataclass
 class MatchReasoning:
     """Detailed reasoning for a match result."""
+    scoring_model: str = "hybrid"
+    scoring_formula: str = ""
     score_breakdown: dict[str, float] = field(default_factory=dict)
+    score_weights: dict[str, float] = field(default_factory=dict)
+    score_contributions: dict[str, float] = field(default_factory=dict)
+    score_penalties: dict[str, float] = field(default_factory=dict)
+    pre_cap_score: float = 0.0
+    score_cap: float = 1.0
+    score_cap_reason: str = ""
     matched_skills: list[str] = field(default_factory=list)
     missing_skills: list[str] = field(default_factory=list)
     strengths: list[str] = field(default_factory=list)
@@ -100,7 +106,15 @@ class MatchReasoning:
     
     def to_dict(self) -> dict[str, Any]:
         return {
+            "scoring_model": self.scoring_model,
+            "scoring_formula": self.scoring_formula,
             "score_breakdown": {k: round(v, 4) for k, v in self.score_breakdown.items()},
+            "score_weights": {k: round(v, 4) for k, v in self.score_weights.items()},
+            "score_contributions": {k: round(v, 4) for k, v in self.score_contributions.items()},
+            "score_penalties": {k: round(v, 4) for k, v in self.score_penalties.items()},
+            "pre_cap_score": round(self.pre_cap_score, 4),
+            "score_cap": round(self.score_cap, 4),
+            "score_cap_reason": self.score_cap_reason,
             "matched_skills": self.matched_skills,
             "missing_skills": self.missing_skills,
             "strengths": self.strengths,
@@ -138,7 +152,15 @@ class HybridMatchResult:
             "cross_encoder_score": round(self.cross_encoder_score, 4) if self.cross_encoder_score is not None else None,
             "semantic_score": round(self.semantic_score, 4),
             "esco_coverage": round(sm.esco_coverage, 4),
+            "scoring_model": reas.scoring_model,
+            "scoring_formula": reas.scoring_formula,
             "score_breakdown": {k: round(v, 4) for k, v in reas.score_breakdown.items()},
+            "score_weights": {k: round(v, 4) for k, v in reas.score_weights.items()},
+            "score_contributions": {k: round(v, 4) for k, v in reas.score_contributions.items()},
+            "score_penalties": {k: round(v, 4) for k, v in reas.score_penalties.items()},
+            "pre_cap_score": round(reas.pre_cap_score, 4),
+            "score_cap": round(reas.score_cap, 4),
+            "score_cap_reason": reas.score_cap_reason,
             "matched_skills": reas.matched_skills,
             "missing_skills": reas.missing_skills,
             "strengths": reas.strengths,
@@ -214,12 +236,21 @@ class HybridMatchingEngine:
         # Step 1: Pre-compute job embedding once (not per candidate)
         job_text = f"{job.title or ''} {job.description}"
         logger.info("Step 1/4: Computing job embedding...")
-        try:
-            job_embedding_vec = (await self.embedder.embed([job_text]))[0]
-            logger.info("Job embedding computed", extra={"dimension": len(job_embedding_vec)})
-        except Exception as e:
-            logger.warning("Job embedding failed, using fallback", extra={"error": str(e)})
+        semantic_enabled = settings.embedding_provider.lower() != "hash"
+        if not semantic_enabled:
             job_embedding_vec = None
+            logger.info("Semantic scoring disabled for hash embedding provider")
+        elif not is_embedding_quality_text(job_text):
+            job_embedding_vec = None
+            logger.warning("Job text too short for semantic embedding", extra={"job_id": job.id})
+        else:
+            try:
+                job_embedding_vec = (await self.embedder.embed([job_text]))[0]
+                validate_embedding_vector(job_embedding_vec)
+                logger.info("Job embedding computed", extra={"dimension": len(job_embedding_vec)})
+            except Exception as e:
+                logger.warning("Job embedding failed; semantic score disabled", extra={"error_type": type(e).__name__})
+                job_embedding_vec = None
 
         # Step 2: Batch-compute candidate embeddings with caching
         logger.info("Step 2/4: Computing candidate embeddings (batch)...")
@@ -236,14 +267,17 @@ class HybridMatchingEngine:
                 if emb is not None:
                     candidate_embeddings[i] = emb
                 else:
-                    uncached_indices.append(i)
-                    uncached_texts.append(candidate_texts[i])
+                    if is_embedding_quality_text(candidate_texts[i]):
+                        uncached_indices.append(i)
+                        uncached_texts.append(candidate_texts[i])
             if uncached_indices:
                 logger.info("Cache miss for %d/%d candidates, computing embeddings...",
                             len(uncached_indices), len(candidates))
         else:
-            uncached_indices = list(range(len(candidates)))
-            uncached_texts = candidate_texts
+            for i, text in enumerate(candidate_texts):
+                if is_embedding_quality_text(text):
+                    uncached_indices.append(i)
+                    uncached_texts.append(text)
 
         if job_embedding_vec is not None and uncached_texts:
             try:
@@ -302,13 +336,13 @@ class HybridMatchingEngine:
             semantic_scores = {}
 
         for i, candidate in enumerate(candidates):
-            semantic_score = semantic_scores.get(i, 0.5)
+            semantic_score = semantic_scores.get(i, 0.0)
             result = await self._compute_match(job, candidate, semantic_score)
             if result:
                 results.append(result)
         
         # Sort by initial score
-        results.sort(key=lambda r: r.final_score, reverse=True)
+        results.sort(key=lambda r: (-r.final_score, r.candidate_id))
         
         # Cross-encoder re-ranking for top candidates
         if enable_cross_encoder and cross_encoder_top_k > 0:
@@ -316,18 +350,20 @@ class HybridMatchingEngine:
             logger.info("Step 4/4: Cross-encoder re-ranking top %d candidates...", top_n)
             cross_scores = await self._cross_encoder_rerank(job, [r.candidate_id for r in results[:top_n]], candidates)
             
-            for i, result in enumerate(results[:top_n]):
+            for result in results[:top_n]:
                 if result.candidate_id in cross_scores:
                     cross_score = cross_scores[result.candidate_id]
+                    base_score = result.final_score
                     result.cross_encoder_score = cross_score
                     
                     # Recompute final score with cross-encoder
                     result.final_score = self._compute_final_score_with_cross_encoder(
                         result, cross_score
                     )
+                    self._apply_cross_encoder_explanation(result, cross_score, base_score)
         
         # Final sort
-        results.sort(key=lambda r: r.final_score, reverse=True)
+        results.sort(key=lambda r: (-r.final_score, r.candidate_id))
         
         top_results = results[:top_k]
         if top_results:
@@ -346,7 +382,7 @@ class HybridMatchingEngine:
         
         return top_results
     
-    async def _compute_match(self, job: Job, candidate: Candidate, semantic_score: float = 0.5) -> HybridMatchResult | None:
+    async def _compute_match(self, job: Job, candidate: Candidate, semantic_score: float = 0.0) -> HybridMatchResult | None:
         """Compute match between a job and candidate."""
         try:
             # Skill matching
@@ -357,16 +393,16 @@ class HybridMatchingEngine:
             
             # Estimated years for frontend compatibility
             estimated_years = candidate.total_years_experience
-            years_score = min(1.0, (estimated_years or 0) / 10.0)
+            years_score = seniority_score
             
             # Build reasoning
             reasoning = self._build_reasoning(
-                job, candidate, skill_result, semantic_score, seniority_score
+                job, candidate, skill_result, semantic_score, seniority_score, years_score
             )
             
             # Compute final score
             final_score = self._compute_final_score(
-                skill_result, semantic_score, seniority_score
+                skill_result, semantic_score, seniority_score, years_score
             )
             
             # Ensure score is bounded [0, 1]
@@ -390,9 +426,12 @@ class HybridMatchingEngine:
         """Compute ESCO-aware skill matching."""
         result = SkillMatchResult()
         
-        required_skills = job.required_skills or []
-        optional_skills = job.optional_skills or []
-        candidate_skills = candidate.skills or []
+        required_skills = self._dedupe_skills(job.required_skills or [])
+        optional_skills = [
+            skill for skill in self._dedupe_skills(job.optional_skills or [])
+            if skill.lower().strip() not in {s.lower().strip() for s in required_skills}
+        ]
+        candidate_skills = self._dedupe_skills(candidate.skills or [])
         
         if not required_skills and not optional_skills:
             result.skill_score = 0.5  # Neutral score when no requirements
@@ -408,7 +447,7 @@ class HybridMatchingEngine:
         # Match required skills
         esco_matches = 0
         for req_skill in required_skills:
-            match = self._match_single_skill(req_skill, candidate_skills, candidate_normalized)
+            match = self._match_single_skill(req_skill, candidate_skills, candidate_normalized, candidate)
             if match:
                 result.matched_required.append(match)
                 if match.normalized:
@@ -418,7 +457,7 @@ class HybridMatchingEngine:
         
         # Match optional skills
         for opt_skill in optional_skills:
-            match = self._match_single_skill(opt_skill, candidate_skills, candidate_normalized)
+            match = self._match_single_skill(opt_skill, candidate_skills, candidate_normalized, candidate)
             if match:
                 result.matched_optional.append(match)
                 if match.normalized:
@@ -447,23 +486,37 @@ class HybridMatchingEngine:
         result.esco_coverage = esco_matches / total_skills if total_skills > 0 else 0.0
         
         return result
+
+    @staticmethod
+    def _dedupe_skills(skills: list[str]) -> list[str]:
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for skill in skills:
+            normalized = skill.lower().strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            deduped.append(skill)
+        return deduped
     
     def _match_single_skill(
         self,
         required_skill: str,
         candidate_skills: list[str],
         candidate_normalized: dict[str, NormalizedSkill],
+        candidate: Candidate,
     ) -> SkillMatch | None:
         """Match a single required skill against candidate skills."""
         req_lower = required_skill.lower().strip()
         
         # Direct match
         if req_lower in [s.lower() for s in candidate_skills]:
+            confidence = self._evidence_adjusted_confidence(required_skill, candidate, 1.0)
             return SkillMatch(
                 skill=required_skill,
                 normalized=candidate_normalized.get(req_lower),
                 match_type="exact",
-                confidence=1.0,
+                confidence=confidence,
             )
 
         # Curated synonym matching. Keep this narrow: broad category matches
@@ -473,11 +526,12 @@ class HybridMatchingEngine:
             cand_lower = cand_skill.lower().strip()
             cand_synonyms = SYNONYM_MAP.get(cand_lower, set())
             if cand_lower in req_synonyms or req_lower in cand_synonyms:
+                confidence = self._evidence_adjusted_confidence(required_skill, candidate, 0.85)
                 return SkillMatch(
                     skill=required_skill,
                     normalized=candidate_normalized.get(cand_lower),
                     match_type="synonym",
-                    confidence=0.85,
+                    confidence=confidence,
                 )
         
         # ESCO-based matching
@@ -487,11 +541,12 @@ class HybridMatchingEngine:
             for cand_skill, cand_norm in candidate_normalized.items():
                 # Same ESCO URI
                 if cand_norm and cand_norm.esco_uri == req_norm.esco_uri:
+                    confidence = self._evidence_adjusted_confidence(required_skill, candidate, 0.95)
                     return SkillMatch(
                         skill=required_skill,
                         normalized=cand_norm,
                         match_type="synonym",
-                        confidence=0.95,
+                        confidence=confidence,
                     )
             
             # Check related skills
@@ -499,14 +554,53 @@ class HybridMatchingEngine:
             for rel in related:
                 for cand_skill, cand_norm in candidate_normalized.items():
                     if cand_norm and cand_norm.esco_uri == rel.skill.esco_uri:
+                        confidence = self._evidence_adjusted_confidence(required_skill, candidate, rel.similarity_score)
                         return SkillMatch(
                             skill=required_skill,
                             normalized=cand_norm,
                             match_type="related",
-                            confidence=rel.similarity_score,
+                            confidence=confidence,
                         )
             
         return None
+
+    def _evidence_adjusted_confidence(self, skill: str, candidate: Candidate, base_confidence: float) -> float:
+        if self._candidate_has_skill_evidence(skill, candidate):
+            return base_confidence
+        return min(base_confidence, 0.80)
+
+    def _candidate_has_skill_evidence(self, skill: str, candidate: Candidate) -> bool:
+        skill_lower = skill.lower().strip()
+        for detail in candidate.skills_detailed or []:
+            if not isinstance(detail, dict):
+                continue
+            name = str(detail.get("name", "")).lower().strip()
+            status = str(detail.get("status", "")).lower().strip()
+            context = str(detail.get("context", "")).strip()
+            if name == skill_lower and status in {"has_experience", "unknown"} and context:
+                return True
+
+        evidence_text = " ".join(
+            list(candidate.experience or [])[:20]
+            + list(candidate.projects or [])[:20]
+            + list(candidate.education or [])[:10]
+        ).lower()
+        if skill_lower in evidence_text:
+            return True
+        return self._raw_text_has_non_stuffed_skill(skill_lower, candidate)
+
+    def _raw_text_has_non_stuffed_skill(self, skill: str, candidate: Candidate) -> bool:
+        raw_text = (candidate.raw_text or "").lower()
+        if skill not in raw_text:
+            return False
+        tokens = [token for token in raw_text.replace("/", " ").replace(",", " ").split() if token]
+        if not tokens:
+            return False
+        skill_mentions = raw_text.count(skill)
+        if skill_mentions > 2:
+            return False
+        unique_ratio = len(set(tokens)) / len(tokens)
+        return unique_ratio >= 0.45
     
     def _build_candidate_text(self, candidate: Candidate) -> str:
         """Build text representation of candidate for embedding."""
@@ -558,6 +652,7 @@ class HybridMatchingEngine:
         skill_result: SkillMatchResult,
         semantic_score: float,
         seniority_score: float,
+        years_score: float,
     ) -> MatchReasoning:
         """Build detailed reasoning for the match."""
         reasoning = MatchReasoning()
@@ -567,8 +662,38 @@ class HybridMatchingEngine:
             "skill_required": skill_result.required_score,
             "skill_optional": skill_result.optional_score,
             "semantic": semantic_score,
+            "experience": years_score,
             "seniority": seniority_score,
         }
+        reasoning.scoring_model = "hybrid"
+        reasoning.scoring_formula = (
+            "0.35 required skills + 0.15 optional skills + 0.20 semantic fit "
+            "+ 0.15 experience + 0.10 seniority - missing required penalty; "
+            "then capped by required-skill coverage"
+        )
+        reasoning.score_weights = {
+            "skill_required": self.weights["skill_required"],
+            "skill_optional": self.weights["skill_optional"],
+            "semantic": self.weights["semantic"],
+            "experience": self.weights["experience"],
+            "seniority_match": self.weights["seniority_match"],
+        }
+        reasoning.score_contributions = {
+            "skill_required": self.weights["skill_required"] * skill_result.required_score,
+            "skill_optional": self.weights["skill_optional"] * skill_result.optional_score,
+            "semantic": self.weights["semantic"] * semantic_score,
+            "experience": self.weights["experience"] * years_score,
+            "seniority_match": self.weights["seniority_match"] * seniority_score,
+        }
+        total_required = len(skill_result.matched_required) + len(skill_result.missing_required)
+        missing_penalty = 0.0
+        if total_required > 0:
+            missing_penalty = 0.30 * (len(skill_result.missing_required) / total_required)
+        base_score = sum(reasoning.score_contributions.values())
+        reasoning.score_penalties = {"missing_required": missing_penalty} if missing_penalty else {}
+        reasoning.pre_cap_score = max(0.0, base_score - missing_penalty)
+        reasoning.score_cap = self._required_skill_score_cap(skill_result)
+        reasoning.score_cap_reason = self._required_skill_score_cap_reason(skill_result)
         
         # Matched and missing skills
         reasoning.matched_skills = [m.skill for m in skill_result.matched_required]
@@ -619,6 +744,7 @@ class HybridMatchingEngine:
         skill_result: SkillMatchResult,
         semantic_score: float,
         seniority_score: float,
+        years_score: float = 0.0,
     ) -> float:
         """Compute final weighted score without cross-encoder."""
         w = self.weights
@@ -627,6 +753,7 @@ class HybridMatchingEngine:
             w["skill_required"] * skill_result.required_score +
             w["skill_optional"] * skill_result.optional_score +
             w["semantic"] * semantic_score +
+            w["experience"] * years_score +
             w["seniority_match"] * seniority_score
         )
         
@@ -636,7 +763,8 @@ class HybridMatchingEngine:
         if total_required > 0:
             missing_penalty = 0.30 * (len(skill_result.missing_required) / total_required)
         
-        return max(0.0, score - missing_penalty)
+        final_score = max(0.0, score - missing_penalty)
+        return min(final_score, self._required_skill_score_cap(skill_result))
     
     def _compute_final_score_with_cross_encoder(
         self,
@@ -654,9 +782,65 @@ class HybridMatchingEngine:
             result.skill_match,
             result.semantic_score,
             result.reasoning.score_breakdown.get("seniority", 0.5),
+            result.years_score,
         )
         
-        return cross_weight * cross_score + remaining_weight * other_score
+        score = cross_weight * max(0.0, min(1.0, cross_score)) + remaining_weight * other_score
+        return min(max(0.0, score), self._required_skill_score_cap(result.skill_match))
+
+    def _apply_cross_encoder_explanation(
+        self,
+        result: HybridMatchResult,
+        cross_score: float,
+        base_score: float,
+    ) -> None:
+        cross_weight = self.weights["cross_encoder"]
+        base_weight = 1.0 - cross_weight
+        result.reasoning.scoring_model = "hybrid_cross_encoder"
+        result.reasoning.scoring_formula = (
+            "0.60 LLM deep rerank + 0.40 base hybrid score; "
+            "then capped by required-skill coverage"
+        )
+        result.reasoning.score_breakdown = {
+            **result.reasoning.score_breakdown,
+            "cross_encoder": cross_score,
+            "base_hybrid": base_score,
+        }
+        result.reasoning.score_weights = {
+            "cross_encoder": cross_weight,
+            "base_hybrid": base_weight,
+        }
+        result.reasoning.score_contributions = {
+            "cross_encoder": cross_weight * max(0.0, min(1.0, cross_score)),
+            "base_hybrid": base_weight * base_score,
+        }
+        result.reasoning.pre_cap_score = sum(result.reasoning.score_contributions.values())
+        result.reasoning.score_cap = self._required_skill_score_cap(result.skill_match)
+        result.reasoning.score_cap_reason = self._required_skill_score_cap_reason(result.skill_match)
+
+    def _required_skill_score_cap(self, skill_result: SkillMatchResult) -> float:
+        total_required = len(skill_result.matched_required) + len(skill_result.missing_required)
+        if total_required == 0:
+            return 1.0
+        if skill_result.required_score <= 0.0:
+            return 0.40
+        if skill_result.required_score < 0.5:
+            return 0.55
+        if skill_result.required_score < 1.0:
+            return 0.75
+        return 1.0
+
+    def _required_skill_score_cap_reason(self, skill_result: SkillMatchResult) -> str:
+        total_required = len(skill_result.matched_required) + len(skill_result.missing_required)
+        if total_required == 0:
+            return "No required skills were defined for this job."
+        if skill_result.required_score <= 0.0:
+            return "No required skills matched, so the score is capped at 40%."
+        if skill_result.required_score < 0.5:
+            return "Less than half of required skills matched, so the score is capped at 55%."
+        if skill_result.required_score < 1.0:
+            return "Some required skills are missing, so the score is capped at 75%."
+        return "All required skills matched, so no required-skill cap was applied."
     
     async def _get_cached_embedding(self, vector_store: VectorStore, candidate: Candidate) -> list[float] | None:
         try:
@@ -668,7 +852,10 @@ class HybridMatchingEngine:
             )
             result = await vector_store.session.execute(stmt)
             row = result.scalar_one_or_none()
-            return row if row else None
+            if row:
+                validate_embedding_vector(row)
+                return row
+            return None
         except Exception:
             return None
 

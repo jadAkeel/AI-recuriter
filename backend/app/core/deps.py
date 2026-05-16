@@ -10,21 +10,25 @@ from app.models.user import User
 from app.services.auth import decode_token, get_user_by_id
 from sqlalchemy import select
 
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 STAFF_ROLES = {"owner", "admin", "recruiter"}
 
 
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
     session: AsyncSession = Depends(get_db_session),
 ) -> User:
+    if credentials is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+
     payload = decode_token(credentials.credentials)
-    if payload is None or payload.get("type") != "access":
+    user_id = payload.get("sub") if payload else None
+    if payload is None or payload.get("type") != "access" or not isinstance(user_id, str):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
-    user = await get_user_by_id(session, payload["sub"])
+    user = await get_user_by_id(session, user_id)
     if user is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
     return user
 
 

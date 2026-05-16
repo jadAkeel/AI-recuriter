@@ -3,7 +3,7 @@ import api from '../../api/client';
 import { Upload, CheckCircle, Clock, AlertCircle } from 'lucide-react';
 import type { CandidateUploadResult } from '../../types/api';
 import { getApiErrorMessage } from '../../utils/errors';
-import { buildApiWebSocketUrl } from '../../utils/network';
+import { buildAuthenticatedWebSocketUrl } from '../../utils/network';
 
 export default function UploadCV() {
   const [result, setResult] = useState<CandidateUploadResult | null>(null);
@@ -45,7 +45,7 @@ export default function UploadCV() {
   const waitForResult = (taskId: string) => {
     startPolling(taskId);
     let finished = false;
-    const ws = new WebSocket(buildApiWebSocketUrl('/ws/cv-notifications'));
+    const ws = new WebSocket(buildAuthenticatedWebSocketUrl('/ws/cv-notifications'));
     wsRef.current = ws;
 
     ws.onopen = () => setStatus('queued');
@@ -110,7 +110,7 @@ export default function UploadCV() {
           <p className="text-gray-600 mb-4">Upload your CV in PDF, DOCX, or TXT format</p>
           <label className="inline-flex items-center gap-2 px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 cursor-pointer">
             Choose File
-            <input type="file" accept=".pdf,.docx,.doc,.txt" onChange={handleUpload} className="hidden" />
+            <input type="file" accept=".pdf,.docx,.txt" onChange={handleUpload} className="hidden" />
           </label>
         </div>
       )}

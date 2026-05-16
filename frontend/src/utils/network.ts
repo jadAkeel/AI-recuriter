@@ -6,3 +6,12 @@ export function buildApiWebSocketUrl(path: string): string {
   const normalizedPath = path.startsWith('/') ? path : `/${path}`;
   return `${WS_API_BASE}${normalizedPath}`;
 }
+
+export function buildAuthenticatedWebSocketUrl(path: string): string {
+  const token = localStorage.getItem('access_token');
+  const url = new URL(buildApiWebSocketUrl(path));
+  if (token) {
+    url.searchParams.set('token', token);
+  }
+  return url.toString();
+}

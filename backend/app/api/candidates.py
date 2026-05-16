@@ -3,14 +3,14 @@ from __future__ import annotations
 import logging
 import json
 import uuid
-import os
+import re
 from pathlib import Path
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, Query
 from fastapi.responses import StreamingResponse, PlainTextResponse, FileResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.db import get_db_session
+from app.core.db import SessionLocal, get_db_session
 from app.core.deps import ensure_candidate_access, get_current_user, require_any_role
 from app.core.config import settings
 from sqlalchemy import delete as sa_delete
@@ -36,7 +36,8 @@ router = APIRouter()
 
 CV_STORAGE = Path(settings.cv_storage_path)
 PENDING_CV_STORAGE = CV_STORAGE.parent / "pending_cvs"
-MAX_CV_UPLOAD_BYTES = 15 * 1024 * 1024
+MAX_CV_UPLOAD_BYTES = settings.max_upload_bytes
+ALLOWED_CV_EXTENSIONS = {".pdf", ".docx", ".txt", ""}
 
 
 def _ensure_cv_storage():
@@ -47,10 +48,23 @@ def _ensure_pending_cv_storage():
     PENDING_CV_STORAGE.mkdir(parents=True, exist_ok=True)
 
 
+def _safe_download_name(name: str | None, ext: str) -> str:
+    base = re.sub(r"[^A-Za-z0-9._ -]+", "_", name or "CV").strip(" ._")
+    return f"{base or 'CV'}{ext}"
+
+
+def _validate_cv_filename(filename: str | None) -> str:
+    safe_name = filename or "cv.txt"
+    ext = Path(safe_name).suffix.lower()
+    if ext not in ALLOWED_CV_EXTENSIONS:
+        raise ValueError("Unsupported CV file type. Allowed types: PDF, DOCX, TXT.")
+    return safe_name
+
+
 def _save_cv_file(candidate_id: str, filename: str, content: bytes) -> str:
     _ensure_cv_storage()
     ext = Path(filename).suffix.lower()
-    if ext not in (".pdf", ".docx", ".doc", ".txt"):
+    if ext not in (".pdf", ".docx", ".txt"):
         ext = ".pdf"
     dest = CV_STORAGE / f"{candidate_id}{ext}"
     dest.write_bytes(content)
@@ -60,7 +74,7 @@ def _save_cv_file(candidate_id: str, filename: str, content: bytes) -> str:
 def _save_pending_cv_file(task_id: str, filename: str, content: bytes) -> str:
     _ensure_pending_cv_storage()
     ext = Path(filename).suffix.lower()
-    if ext not in (".pdf", ".docx", ".doc", ".txt"):
+    if ext not in (".pdf", ".docx", ".txt"):
         ext = ".pdf"
     dest = PENDING_CV_STORAGE / f"{task_id}{ext}"
     dest.write_bytes(content)
@@ -68,27 +82,39 @@ def _save_pending_cv_file(task_id: str, filename: str, content: bytes) -> str:
 
 
 def _get_cv_file_path(candidate_id: str) -> Path | None:
-    for ext in (".pdf", ".docx", ".doc", ".txt"):
+    for ext in (".pdf", ".docx", ".txt"):
         p = CV_STORAGE / f"{candidate_id}{ext}"
         if p.exists():
             return p
     return None
 
 
+def _delete_cv_files(candidate_id: str) -> None:
+    for ext in (".pdf", ".docx", ".txt"):
+        path = CV_STORAGE / f"{candidate_id}{ext}"
+        try:
+            path.unlink(missing_ok=True)
+        except Exception:
+            logger.warning("Failed to delete CV file", extra={"candidate_id": candidate_id, "path": str(path)})
+
+
 async def _read_upload_content(file: UploadFile) -> bytes:
+    _validate_cv_filename(file.filename)
     content = await file.read(MAX_CV_UPLOAD_BYTES + 1)
     if len(content) > MAX_CV_UPLOAD_BYTES:
-        raise ValueError("CV file is too large. Maximum size is 15MB.")
+        max_mb = MAX_CV_UPLOAD_BYTES // (1024 * 1024)
+        raise ValueError(f"CV file is too large. Maximum size is {max_mb}MB.")
     return content
 
 
-async def _create_candidate_from_upload(
-    file: UploadFile,
+async def _create_candidate_from_content(
+    filename: str,
+    content: bytes,
     use_llm: bool,
     session: AsyncSession,
 ) -> CandidateRecord:
-    content = await _read_upload_content(file)
-    text = extract_text(file.filename or "", content)
+    filename = _validate_cv_filename(filename)
+    text = extract_text(filename, content)
 
     if use_llm:
         parser = get_enhanced_cv_parser()
@@ -96,7 +122,7 @@ async def _create_candidate_from_upload(
         logger.info(
             "Candidate created with enhanced parser",
             extra={
-                "cv_filename": file.filename,
+                "cv_filename": filename,
                 "skills_count": len(profile.skills),
                 "negative_count": len(profile.negative_skills),
             },
@@ -107,20 +133,21 @@ async def _create_candidate_from_upload(
         profile = parse_cv_text(text)
         logger.info(
             "Candidate created with simple parser",
-            extra={"cv_filename": file.filename, "skills_count": len(profile.skills)},
+            extra={"cv_filename": filename, "skills_count": len(profile.skills)},
         )
 
-    try:
-        esco = await get_esco_extractor()
-        esco_result = await esco.extract_skills(text, top_k=20)
-        esco_skills = {m.skill.title.lower() for m in esco_result.skills}
-        existing_skills = set(s.lower() for s in profile.skills)
-        new_from_esco = [s for s in esco_skills if s not in existing_skills]
-        if new_from_esco:
-            profile.skills.extend(sorted(new_from_esco))
-            logger.info("ESCO enriched candidate with %d new skills", len(new_from_esco))
-    except Exception:
-        logger.warning("ESCO enrichment skipped (not available)")
+    if settings.esco_api_enabled:
+        try:
+            esco = await get_esco_extractor()
+            esco_result = await esco.extract_skills(text, top_k=20)
+            esco_skills = {m.skill.title.lower() for m in esco_result.skills}
+            existing_skills = set(s.lower() for s in profile.skills)
+            new_from_esco = [s for s in esco_skills if s not in existing_skills]
+            if new_from_esco:
+                profile.skills.extend(sorted(new_from_esco))
+                logger.info("ESCO enriched candidate with %d new skills", len(new_from_esco))
+        except Exception:
+            logger.warning("ESCO enrichment skipped (not available)")
 
     existing_candidate = None
     if profile.email:
@@ -133,7 +160,7 @@ async def _create_candidate_from_upload(
             "Candidate already exists, returning existing",
             extra={"email": profile.email, "candidate_id": existing_candidate.id},
         )
-        _save_cv_file(existing_candidate.id, file.filename or "cv.pdf", content)
+        _save_cv_file(existing_candidate.id, filename, content)
         cv_url = f"/api/v1/candidates/{existing_candidate.id}/cv"
         return CandidateRecord(
             candidate_id=existing_candidate.id,
@@ -175,7 +202,7 @@ async def _create_candidate_from_upload(
     session.add(candidate)
     await session.commit()
 
-    _save_cv_file(candidate_id, file.filename or "cv.pdf", content)
+    _save_cv_file(candidate_id, filename, content)
 
     parts = []
     if profile.skills:
@@ -201,6 +228,20 @@ async def _create_candidate_from_upload(
 
     cv_url = f"/api/v1/candidates/{candidate_id}/cv"
     return CandidateRecord(candidate_id=candidate_id, cv_url=cv_url, **profile.model_dump())
+
+
+async def _create_candidate_from_upload(
+    file: UploadFile,
+    use_llm: bool,
+    session: AsyncSession,
+) -> CandidateRecord:
+    content = await _read_upload_content(file)
+    return await _create_candidate_from_content(
+        filename=file.filename or "cv.txt",
+        content=content,
+        use_llm=use_llm,
+        session=session,
+    )
 
 
 @router.get("/skills/categories")
@@ -234,7 +275,7 @@ async def create_candidate(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Candidate creation failed")
-        raise HTTPException(status_code=500, detail=f"Candidate creation failed: {str(exc)}") from exc
+        raise HTTPException(status_code=500, detail="Candidate creation failed") from exc
 
 
 @router.post("/candidates/async")
@@ -242,7 +283,6 @@ async def create_candidate_async(
     file: UploadFile = File(...),
     use_llm: bool = Query(default=True),
     _: User = Depends(require_any_role("owner", "admin", "recruiter", "candidate")),
-    session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, str]:
     try:
         content = await _read_upload_content(file)
@@ -285,9 +325,16 @@ async def list_candidates(
     degree: str | None = Query(default=None, description="Filter by degree name"),
     sort_by: str | None = Query(default=None, description="Sort field: name, experience, skills, education, newest"),
     sort_dir: str | None = Query(default="desc", description="Sort direction: asc or desc"),
+    limit: int = Query(default=200, ge=1, le=1000, description="Maximum candidates to return"),
+    offset: int = Query(default=0, ge=0, description="Number of candidates to skip after filtering"),
     _: User = Depends(require_any_role("owner", "admin", "recruiter")),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[CandidateRecord]:
+    if skill_logic not in {"and", "or"}:
+        raise HTTPException(status_code=400, detail="skill_logic must be 'and' or 'or'")
+    if sort_dir not in {"asc", "desc"}:
+        raise HTTPException(status_code=400, detail="sort_dir must be 'asc' or 'desc'")
+
     stmt = select(Candidate)
     if search:
         search_lower = search.lower()
@@ -396,22 +443,30 @@ async def list_candidates(
         def _edu_score(r: CandidateRecord) -> int:
             for entry in r.education_entries:
                 deg = (entry.get("degree", "") or "").lower()
-                if "phd" in deg or "doctor" in deg: return 4
-                if "master" in deg or "msc" in deg or "ma" in deg or "mba" in deg: return 3
-                if "bachelor" in deg or "bs" in deg or "ba" in deg or "bsc" in deg: return 2
-                if "associate" in deg or "diploma" in deg: return 1
+                if "phd" in deg or "doctor" in deg:
+                    return 4
+                if "master" in deg or "msc" in deg or "ma" in deg or "mba" in deg:
+                    return 3
+                if "bachelor" in deg or "bs" in deg or "ba" in deg or "bsc" in deg:
+                    return 2
+                if "associate" in deg or "diploma" in deg:
+                    return 1
             for e in r.education:
                 el = e.lower()
-                if "phd" in el or "doctor" in el: return 4
-                if "master" in el or "msc" in el or "ma" in el or "mba" in el: return 3
-                if "bachelor" in el or "bs" in el or "ba" in el or "bsc" in el: return 2
-                if "associate" in el or "diploma" in el: return 1
+                if "phd" in el or "doctor" in el:
+                    return 4
+                if "master" in el or "msc" in el or "ma" in el or "mba" in el:
+                    return 3
+                if "bachelor" in el or "bs" in el or "ba" in el or "bsc" in el:
+                    return 2
+                if "associate" in el or "diploma" in el:
+                    return 1
             return 0
         records.sort(key=_edu_score, reverse=(sort_dir == "desc"))
     else:
         records.sort(key=lambda r: r.candidate_id or "", reverse=True)
 
-    return records
+    return records[offset: offset + limit]
 
 
 @router.get("/candidates/me", response_model=CandidateRecord)
@@ -502,7 +557,7 @@ async def preview_cv(
         }
         ext = file_path.suffix.lower()
         media_type = media_type_map.get(ext, "application/octet-stream")
-        name = f"{candidate.full_name or 'CV'}{ext}"
+        name = _safe_download_name(candidate.full_name, ext)
         return FileResponse(
             path=str(file_path),
             media_type=media_type,
@@ -540,6 +595,7 @@ async def delete_candidate(
 
     await session.delete(candidate)
     await session.commit()
+    _delete_cv_files(candidate_id)
 
     logger.info("Candidate deleted", extra={"candidate_id": candidate_id})
     return {"status": "ok", "message": f"Candidate {candidate_id} deleted"}
@@ -554,12 +610,15 @@ async def delete_all_candidates(
     cand_result = await session.execute(cand_stmt)
     candidates = cand_result.scalars().all()
 
-    await session.execute(sa_delete(MatchResult).where(MatchResult.candidate_id.in_([c.id for c in candidates])))
-    await session.execute(sa_delete(Report).where(Report.candidate_id.in_([c.id for c in candidates])))
-    await session.execute(sa_delete(InterviewSession).where(InterviewSession.candidate_id.in_([c.id for c in candidates])))
+    candidate_ids = [c.id for c in candidates]
+    if candidate_ids:
+        await session.execute(sa_delete(MatchResult).where(MatchResult.candidate_id.in_(candidate_ids)))
+        await session.execute(sa_delete(Report).where(Report.candidate_id.in_(candidate_ids)))
+        await session.execute(sa_delete(InterviewSession).where(InterviewSession.candidate_id.in_(candidate_ids)))
     await session.execute(sa_delete(Embedding).where(Embedding.entity_type == "candidate"))
 
     for candidate in candidates:
+        _delete_cv_files(candidate.id)
         await session.delete(candidate)
 
     await session.commit()
@@ -574,20 +633,35 @@ async def stream_candidates(
     files: list[UploadFile] = File(...),
     use_llm: bool = Query(default=True, description="Use LLM (Ollama) for enhanced CV parsing"),
     _: User = Depends(require_any_role("owner", "admin", "recruiter")),
-    session: AsyncSession = Depends(get_db_session),
 ) -> StreamingResponse:
+    prepared_files: list[tuple[str, bytes]] = []
+    for file in files:
+        try:
+            prepared_files.append((file.filename or "cv.txt", await _read_upload_content(file)))
+        except ValueError as exc:
+            prepared_files.append((file.filename or "cv.txt", b""))
+            logger.warning("Rejected CV in stream upload", extra={"cv_filename": file.filename, "error": str(exc)})
+
     async def event_stream():
-        for file in files:
+        for filename, content in prepared_files:
             try:
-                record = await _create_candidate_from_upload(file=file, use_llm=use_llm, session=session)
+                if not content:
+                    raise ValueError("CV file is empty or invalid")
+                async with SessionLocal() as stream_session:
+                    record = await _create_candidate_from_content(
+                        filename=filename,
+                        content=content,
+                        use_llm=use_llm,
+                        session=stream_session,
+                    )
                 payload = {
-                    "filename": file.filename,
+                    "filename": filename,
                     "status": "success",
                     "candidate": record.model_dump(),
                 }
             except Exception as exc:
                 payload = {
-                    "filename": file.filename,
+                    "filename": filename,
                     "status": "failed",
                     "error": str(exc),
                 }

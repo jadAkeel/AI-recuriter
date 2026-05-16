@@ -8,8 +8,14 @@ from app.services.skill_catalog import SKILL_KEYWORDS, skill_in_text
 
 logger = logging.getLogger(__name__)
 
-REQUIREMENT_HEADERS = re.compile(r"^(requirements|must have|required skills)\b", re.IGNORECASE)
-OPTIONAL_HEADERS = re.compile(r"^(nice to have|preferred|bonus)\b", re.IGNORECASE)
+REQUIREMENT_HEADERS = re.compile(r"^(requirements|must have|required skills|required qualifications|minimum qualifications)\b", re.IGNORECASE)
+OPTIONAL_HEADERS = re.compile(r"^(nice to have|preferred|bonus|preferred qualifications|desirable)\b", re.IGNORECASE)
+SECTION_BOUNDARY_HEADERS = re.compile(
+    r"^(requirements|must have|required skills|required qualifications|minimum qualifications|"
+    r"nice to have|preferred|bonus|preferred qualifications|desirable|responsibilities|"
+    r"about|benefits|overview|summary)\b",
+    re.IGNORECASE,
+)
 SENIORITY_PATTERNS = {
     "junior": re.compile(r"\b(junior|entry level|associate)\b", re.IGNORECASE),
     "mid": re.compile(r"\b(mid|intermediate)\b", re.IGNORECASE),
@@ -30,17 +36,18 @@ def parse_job_description(text: str) -> JobProfile:
 
     all_skills = _extract_skills(normalized)
 
-    bonus_match = BONUS_PHRASE_PATTERN.search(normalized)
-    if bonus_match:
-        bonus_sentences = _extract_bonus_skills(text, normalized)
-        optional_from_bonus = [s for s in all_skills if s in bonus_sentences]
-        optional = list(set(optional + optional_from_bonus))
-        required = [s for s in all_skills if s not in optional]
-    elif not required:
+    if BONUS_PHRASE_PATTERN.search(normalized):
+        optional = sorted(set(optional) | _extract_bonus_skills(text))
+
+    if not required:
+        required = [s for s in all_skills if s not in set(optional)]
+
+    if not required and not optional:
         required = all_skills
 
     if optional:
-        optional = [skill for skill in optional if skill not in required]
+        optional = sorted(skill for skill in set(optional) if skill not in set(required))
+    required = sorted(set(required))
 
     seniority = _detect_seniority(text)
 
@@ -55,14 +62,14 @@ def parse_job_description(text: str) -> JobProfile:
     return profile
 
 
-def _extract_bonus_skills(text: str, normalized: str) -> set[str]:
+def _extract_bonus_skills(text: str) -> set[str]:
     lines = text.splitlines()
     bonus_skills: set[str] = set()
     for line in lines:
         if BONUS_PHRASE_PATTERN.search(line):
             line_normalized = _normalize_text(line)
             for skill in SKILL_KEYWORDS:
-                if re.search(r"\b" + re.escape(skill) + r"\b", line_normalized):
+                if skill_in_text(skill, line_normalized):
                     bonus_skills.add(skill)
     return bonus_skills
 
@@ -96,7 +103,12 @@ def _extract_section_skills(text: str, header_pattern: re.Pattern[str]) -> list[
     for line in lines:
         if header_pattern.search(line):
             in_section = True
+            remainder = header_pattern.sub("", line, count=1).strip(" :-")
+            if remainder:
+                collected.append(remainder)
             continue
+        if in_section and SECTION_BOUNDARY_HEADERS.search(line):
+            break
         if in_section and not line:
             break
         if in_section:

@@ -4,13 +4,18 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import JSONResponse
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.api.router import api_router
 from app.core.config import settings
 from app.core.db import init_db
 from app.core.logging import configure_logging, shutdown_logging
+from app.core.redis import close_redis
+from app.core.security import RateLimitMiddleware, SecurityHeadersMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +36,7 @@ async def _cv_worker():
         storage = Path(settings.cv_storage_path)
         storage.mkdir(parents=True, exist_ok=True)
         ext = Path(file_name).suffix.lower()
-        if ext not in (".pdf", ".docx", ".doc", ".txt"):
+        if ext not in (".pdf", ".docx", ".txt"):
             ext = ".pdf"
         dest = storage / f"{candidate_id}{ext}"
         dest.write_bytes(content)
@@ -103,8 +108,10 @@ async def _cv_worker():
                 pending_path.unlink(missing_ok=True)
 
             parts = [f"Skills: {', '.join(profile.skills)}"]
-            if profile.experience: parts.append(f"Experience: {' '.join(profile.experience[:10])}")
-            if profile.education: parts.append(f"Education: {' '.join(profile.education[:5])}")
+            if profile.experience:
+                parts.append(f"Experience: {' '.join(profile.experience[:10])}")
+            if profile.education:
+                parts.append(f"Education: {' '.join(profile.education[:5])}")
             try:
                 embedder = get_embedding_service()
                 embedding = (await embedder.embed([". ".join(parts)]))[0]
@@ -133,6 +140,7 @@ async def _cv_worker():
 async def lifespan(_: FastAPI):
     configure_logging()
     try:
+        settings.validate_runtime()
         await init_db()
         logger.info("Embedding provider: %s", settings.embedding_provider)
         worker_task = asyncio.create_task(_cv_worker())
@@ -143,19 +151,42 @@ async def lifespan(_: FastAPI):
         except asyncio.CancelledError:
             pass
     finally:
+        await close_redis()
+        try:
+            from app.services.ollama_cross_encoder import get_ollama_cross_encoder
+
+            await get_ollama_cross_encoder().close()
+        except Exception:
+            logger.debug("Cross-encoder cleanup skipped", exc_info=True)
         shutdown_logging()
 
 
 def create_app() -> FastAPI:
     app = FastAPI(title=settings.app_name, lifespan=lifespan)
+    app.add_middleware(SecurityHeadersMiddleware)
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
+    if settings.trusted_hosts:
+        app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.trusted_hosts)
+    if settings.rate_limit_enabled:
+        app.add_middleware(
+            RateLimitMiddleware,
+            requests=settings.rate_limit_requests,
+            window_seconds=settings.rate_limit_window_seconds,
+        )
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[o.strip() for o in settings.cors_origins_str.split(",")],
+        allow_origins=settings.cors_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
     app.include_router(api_router, prefix=settings.api_prefix)
+
+    @app.exception_handler(Exception)
+    async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+        logger.exception("Unhandled application error", extra={"path": request.url.path})
+        return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+
     return app
 
 

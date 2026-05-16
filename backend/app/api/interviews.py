@@ -161,6 +161,15 @@ def _public_evaluation_payload(interview: InterviewSession) -> dict:
     }
 
 
+def _interview_error(exc: ValueError) -> HTTPException:
+    message = str(exc)
+    if "not found" in message.lower():
+        return HTTPException(status_code=404, detail=message)
+    if "completed" in message.lower() or "current question" in message.lower():
+        return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=message)
+    return HTTPException(status_code=400, detail=message)
+
+
 @router.post("/interviews/start", response_model=StartInterviewResponse)
 async def start_interview(
     request: StartInterviewRequest,
@@ -314,7 +323,7 @@ async def _submit_public_answer(
             request.answer,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise _interview_error(exc) from exc
 
     answers_count = len(interview.answers or [])
     next_question = (
@@ -387,7 +396,7 @@ async def public_evaluate(
         result = await interview_service.evaluate_session(session, session_id)
         return EnhancedEvaluateResponse(**result)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise _interview_error(exc) from exc
 
 
 @router.post("/interviews/answer", response_model=AnswerResponse)
@@ -416,7 +425,7 @@ async def answer_question(
             feedback=result["feedback"],
         )
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise _interview_error(exc) from exc
 
 
 @router.post("/interviews/chat-answer", response_model=ChatAnswerResponse)
@@ -457,7 +466,7 @@ async def chat_answer(
             next_question=next_question,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise _interview_error(exc) from exc
 
 
 @router.post("/interviews/followup", response_model=FollowupResponse)
@@ -481,7 +490,7 @@ async def get_followup_question(
         return FollowupResponse(**result)
     except Exception as exc:
         logger.exception("Follow-up generation failed")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(status_code=500, detail="Follow-up generation failed") from exc
 
 
 @router.get("/interviews/{session_id}", response_model=InterviewSessionStatus)
@@ -534,4 +543,4 @@ async def evaluate(
         result = await interview_service.evaluate_session(session, request.session_id)
         return EnhancedEvaluateResponse(**result)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise _interview_error(exc) from exc

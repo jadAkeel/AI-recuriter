@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import asyncio
 import logging
 import os
 import time
@@ -17,6 +18,7 @@ logger = logging.getLogger(__name__)
 _voice_sessions: dict[str, dict[str, Any]] = {}
 
 TEMP_AUDIO_TTL = 3600
+_WHISPER_MODEL: Any | None = None
 
 
 def _cleanup_temp_files() -> None:
@@ -148,13 +150,19 @@ class VoiceService:
             self._remove_temp_file(tmp_path)
 
     async def _stt_faster_whisper(self, audio_data: bytes) -> str:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._stt_faster_whisper_sync, audio_data)
+
+    def _stt_faster_whisper_sync(self, audio_data: bytes) -> str:
+        global _WHISPER_MODEL
         from faster_whisper import WhisperModel
 
-        model = WhisperModel("base", device="cpu", compute_type="int8")
+        if _WHISPER_MODEL is None:
+            _WHISPER_MODEL = WhisperModel("base", device="cpu", compute_type="int8")
         tmp_path = self._save_temp_audio(audio_data, suffix=".wav")
 
         try:
-            segments, _ = model.transcribe(tmp_path, language="ar")
+            segments, _ = _WHISPER_MODEL.transcribe(tmp_path, language="ar")
             return " ".join(seg.text for seg in segments)
         finally:
             self._remove_temp_file(tmp_path)

@@ -6,3 +6,12 @@ venv/
 .env
 .DS_Store
 app.db
+*.sqlite
+*.sqlite3
+uploads/
+temp_audio/
+cvs_to_upload/
+tests/
+scripts/
+README.md
+*.db

@@ -11,14 +11,13 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from rapidfuzz import fuzz
 
-from app.services.skill_catalog import SKILL_KEYWORDS, SKILL_CATEGORIES
+from app.services.skill_catalog import SKILL_CATEGORIES
 
 logger = logging.getLogger(__name__)
 

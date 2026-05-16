@@ -72,8 +72,8 @@ export default function BulkUpload() {
           }}>
           <Upload className="w-12 h-12 mx-auto mb-3 text-blue-500" />
           <p className="text-gray-600 mb-2">Drag & drop CV files here, or click to select</p>
-          <p className="text-xs text-gray-400 mb-4">PDF, DOCX, DOC, TXT — up to 15MB each</p>
-          <input ref={inputRef} type="file" multiple accept=".pdf,.docx,.doc,.txt"
+          <p className="text-xs text-gray-400 mb-4">PDF, DOCX, TXT — up to 15MB each</p>
+          <input ref={inputRef} type="file" multiple accept=".pdf,.docx,.txt"
             onChange={handleSelect} className="hidden" />
           <button onClick={() => inputRef.current?.click()}
             className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
