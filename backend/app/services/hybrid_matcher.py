@@ -433,15 +433,19 @@ class HybridMatchingEngine:
         ]
         candidate_skills = self._dedupe_skills(candidate.skills or [])
         
-        # Log for debugging
+        # Detailed logging for debugging
         logger.info(
-            "Skill matching started",
+            "=== SKILL MATCHING DEBUG ===",
             extra={
                 "job_id": job.id,
                 "candidate_id": candidate.id,
+                "candidate_email": candidate.email,
+                "required_skills_count": len(required_skills),
                 "required_skills": required_skills,
-                "candidate_skills": candidate_skills,
-                "has_skills": bool(candidate_skills),
+                "candidate_skills_count": len(candidate_skills),
+                "candidate_skills_sample": candidate_skills[:15],  # First 15 skills
+                "candidate_has_skills": bool(candidate_skills),
+                "candidate_skills_full": candidate_skills if len(candidate_skills) <= 20 else f"{len(candidate_skills)} skills total",
             },
         )
         
@@ -456,16 +460,36 @@ class HybridMatchingEngine:
             if norm:
                 candidate_normalized[skill.lower()] = norm
         
+        logger.info(
+            f"Candidate has {len(candidate_normalized)} ESCO-normalized skills out of {len(candidate_skills)} total",
+            extra={"candidate_id": candidate.id},
+        )
+        
         # Match required skills
         esco_matches = 0
+        matched_count = 0
+        missing_count = 0
+        
         for req_skill in required_skills:
             match = self._match_single_skill(req_skill, candidate_skills, candidate_normalized, candidate)
             if match:
                 result.matched_required.append(match)
+                matched_count += 1
                 if match.normalized:
                     esco_matches += 1
             else:
                 result.missing_required.append(req_skill)
+                missing_count += 1
+        
+        logger.info(
+            f"Required skills: {matched_count} matched, {missing_count} missing out of {len(required_skills)} total",
+            extra={
+                "candidate_id": candidate.id,
+                "matched": matched_count,
+                "missing": missing_count,
+                "total": len(required_skills),
+            },
+        )
         
         # Match optional skills
         for opt_skill in optional_skills:
@@ -497,6 +521,11 @@ class HybridMatchingEngine:
         total_skills = total_required + total_optional
         result.esco_coverage = esco_matches / total_skills if total_skills > 0 else 0.0
         
+        logger.info(
+            f"Final skill scores - required: {result.required_score:.2f}, optional: {result.optional_score:.2f}, combined: {result.skill_score:.2f}",
+            extra={"candidate_id": candidate.id},
+        )
+        
         return result
 
     @staticmethod
@@ -523,7 +552,14 @@ class HybridMatchingEngine:
         
         # Direct match - normalize both sides for comparison
         candidate_skills_lower = [s.lower().strip() for s in candidate_skills]
+        
+        # Debug logging
+        logger.debug(
+            f"Matching skill '{required_skill}' (normalized: '{req_lower}') against candidate skills: {candidate_skills_lower[:10]}..."
+        )
+        
         if req_lower in candidate_skills_lower:
+            logger.debug(f"✓ Direct match found for '{required_skill}'")
             confidence = self._evidence_adjusted_confidence(required_skill, candidate, 1.0)
             return SkillMatch(
                 skill=required_skill,
@@ -539,6 +575,7 @@ class HybridMatchingEngine:
             cand_lower = cand_skill.lower().strip()
             cand_synonyms = SYNONYM_MAP.get(cand_lower, set())
             if cand_lower in req_synonyms or req_lower in cand_synonyms:
+                logger.debug(f"✓ Synonym match found for '{required_skill}' via '{cand_skill}'")
                 confidence = self._evidence_adjusted_confidence(required_skill, candidate, 0.85)
                 return SkillMatch(
                     skill=required_skill,
@@ -554,6 +591,7 @@ class HybridMatchingEngine:
             for cand_skill, cand_norm in candidate_normalized.items():
                 # Same ESCO URI
                 if cand_norm and cand_norm.esco_uri == req_norm.esco_uri:
+                    logger.debug(f"✓ ESCO match found for '{required_skill}' via '{cand_skill}'")
                     confidence = self._evidence_adjusted_confidence(required_skill, candidate, 0.95)
                     return SkillMatch(
                         skill=required_skill,
@@ -567,6 +605,7 @@ class HybridMatchingEngine:
             for rel in related:
                 for cand_skill, cand_norm in candidate_normalized.items():
                     if cand_norm and cand_norm.esco_uri == rel.skill.esco_uri:
+                        logger.debug(f"✓ ESCO related match for '{required_skill}' via '{cand_skill}'")
                         confidence = self._evidence_adjusted_confidence(required_skill, candidate, rel.similarity_score)
                         return SkillMatch(
                             skill=required_skill,
@@ -574,7 +613,8 @@ class HybridMatchingEngine:
                             match_type="related",
                             confidence=confidence,
                         )
-            
+        
+        logger.debug(f"✗ No match found for '{required_skill}'")
         return None
 
     def _evidence_adjusted_confidence(self, skill: str, candidate: Candidate, base_confidence: float) -> float:

@@ -2,7 +2,7 @@ param(
     [string]$GmailAddress = "",
     [string]$GmailAppPassword = "",
     [int]$FrontendPort = 5173,
-    [int]$BackendPort = 8000
+    [int]$BackendPort = 8001
 )
 
 $ErrorActionPreference = "Stop"
@@ -128,6 +128,7 @@ if (Test-Path $localTunnelErrorLog) {
 }
 
 try {
+    $env:VITE_API_PROXY_TARGET = "http://127.0.0.1:$BackendPort"
     $frontendProc = Start-Process -WindowStyle Hidden -PassThru -FilePath "C:\Program Files\nodejs\npm.cmd" -ArgumentList @("run", "dev", "--", "--host", "0.0.0.0", "--port", "$FrontendPort") -WorkingDirectory $frontendDir
     Wait-Url -Url "http://127.0.0.1:$FrontendPort"
 
