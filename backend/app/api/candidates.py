@@ -22,11 +22,18 @@ from app.models.match_result import MatchResult
 from app.models.report import Report
 from app.models.user import User
 from app.schemas.candidate import CandidateRecord
+from app.services.candidate_text import build_candidate_embedding_text_from_profile
 from app.services.cv_parser import extract_text
 from app.services.enhanced_cv_parser import get_enhanced_cv_parser
-from app.services.embedding import get_embedding_service
+from app.services.embedding import embedding_metadata_for_text, get_embedding_service
 from app.services.esco_extractor import get_esco_extractor
-from app.services.skill_catalog import SKILL_KEYWORDS, get_categories
+from app.services.skill_catalog import (
+    SKILL_KEYWORDS,
+    get_categories,
+    normalize_skill_name,
+    normalize_text_for_skill_matching,
+    skill_in_text,
+)
 from app.services.task_queue import enqueue_cv_processing
 from app.services.vector_store import VectorStore
 
@@ -41,19 +48,31 @@ ALLOWED_CV_EXTENSIONS = {".pdf", ".docx", ".txt", ""}
 
 
 def _ensure_cv_storage():
+    """
+    Ensures the permanent CV storage directory exists.
+    """
     CV_STORAGE.mkdir(parents=True, exist_ok=True)
 
 
 def _ensure_pending_cv_storage():
+    """
+    Ensures the pending CV upload directory exists.
+    """
     PENDING_CV_STORAGE.mkdir(parents=True, exist_ok=True)
 
 
 def _safe_download_name(name: str | None, ext: str) -> str:
+    """
+    Builds a safe filename for downloading a stored CV.
+    """
     base = re.sub(r"[^A-Za-z0-9._ -]+", "_", name or "CV").strip(" ._")
     return f"{base or 'CV'}{ext}"
 
 
 def _validate_cv_filename(filename: str | None) -> str:
+    """
+    Validates a CV filename and returns a safe fallback name.
+    """
     safe_name = filename or "cv.txt"
     ext = Path(safe_name).suffix.lower()
     if ext not in ALLOWED_CV_EXTENSIONS:
@@ -62,6 +81,9 @@ def _validate_cv_filename(filename: str | None) -> str:
 
 
 def _save_cv_file(candidate_id: str, filename: str, content: bytes) -> str:
+    """
+    Saves an uploaded CV under the candidate ID.
+    """
     _ensure_cv_storage()
     ext = Path(filename).suffix.lower()
     if ext not in (".pdf", ".docx", ".txt"):
@@ -72,6 +94,9 @@ def _save_cv_file(candidate_id: str, filename: str, content: bytes) -> str:
 
 
 def _save_pending_cv_file(task_id: str, filename: str, content: bytes) -> str:
+    """
+    Saves a queued CV upload under its task ID.
+    """
     _ensure_pending_cv_storage()
     ext = Path(filename).suffix.lower()
     if ext not in (".pdf", ".docx", ".txt"):
@@ -82,6 +107,9 @@ def _save_pending_cv_file(task_id: str, filename: str, content: bytes) -> str:
 
 
 def _get_cv_file_path(candidate_id: str) -> Path | None:
+    """
+    Finds the stored CV file for a candidate.
+    """
     for ext in (".pdf", ".docx", ".txt"):
         p = CV_STORAGE / f"{candidate_id}{ext}"
         if p.exists():
@@ -90,6 +118,9 @@ def _get_cv_file_path(candidate_id: str) -> Path | None:
 
 
 def _delete_cv_files(candidate_id: str) -> None:
+    """
+    Deletes stored CV files for a candidate.
+    """
     for ext in (".pdf", ".docx", ".txt"):
         path = CV_STORAGE / f"{candidate_id}{ext}"
         try:
@@ -99,6 +130,9 @@ def _delete_cv_files(candidate_id: str) -> None:
 
 
 async def _read_upload_content(file: UploadFile) -> bytes:
+    """
+    Reads an uploaded CV while enforcing type and size limits.
+    """
     _validate_cv_filename(file.filename)
     content = await file.read(MAX_CV_UPLOAD_BYTES + 1)
     if len(content) > MAX_CV_UPLOAD_BYTES:
@@ -107,12 +141,83 @@ async def _read_upload_content(file: UploadFile) -> bytes:
     return content
 
 
+def _esco_skill_has_text_evidence(skill: str, cv_text: str) -> bool:
+    """
+    Checks whether an ESCO skill is explicitly present in source text.
+    """
+    normalized_text = normalize_text_for_skill_matching(cv_text)
+    return bool(normalized_text and skill_in_text(skill, normalized_text))
+
+
+def _apply_profile_to_candidate(candidate: Candidate, profile) -> None:
+    """
+    Copies parsed profile fields onto a candidate database model.
+    """
+    candidate.full_name = profile.full_name
+    candidate.email = profile.email
+    candidate.phone = profile.phone
+    candidate.skills = profile.skills
+    candidate.skills_detailed = [s.model_dump() for s in profile.skills_detailed] if profile.skills_detailed else None
+    candidate.experience = profile.experience
+    candidate.experience_entries = [e.model_dump() for e in profile.experience_entries] if profile.experience_entries else None
+    candidate.education = profile.education
+    candidate.education_entries = [e.model_dump() for e in profile.education_entries] if profile.education_entries else None
+    candidate.projects = profile.projects
+    candidate.negative_skills = profile.negative_skills or None
+    candidate.learning_skills = profile.learning_skills or None
+    candidate.total_years_experience = profile.total_years_experience
+    candidate.raw_text = profile.raw_text
+
+
+def _candidate_display_skills(candidate: Candidate) -> list[str]:
+    """
+    Builds the visible positive skill list for a candidate.
+    """
+    skills = list(candidate.skills or [])
+    for detail in candidate.skills_detailed or []:
+        if not isinstance(detail, dict):
+            continue
+        status = str(detail.get("status", "")).lower().strip()
+        name = str(detail.get("name", "")).strip()
+        context = str(detail.get("context", "") or "").strip()
+        if name and status not in {"no_experience", "learning"} and context:
+            skills.append(name)
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for skill in skills:
+        normalized = normalize_skill_name(skill)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            result.append(normalized)
+    return result
+
+
+async def _upsert_candidate_embedding(session: AsyncSession, candidate_id: str, profile) -> None:
+    """
+    Creates or updates the embedding stored for a candidate profile.
+    """
+    embedding_text = build_candidate_embedding_text_from_profile(profile)
+    embedder = get_embedding_service()
+    embedding = (await embedder.embed([embedding_text]))[0]
+    store = VectorStore(session)
+    await store.upsert_embedding(
+        "candidate",
+        candidate_id,
+        embedding,
+        metadata=embedding_metadata_for_text(embedding_text),
+    )
+
+
 async def _create_candidate_from_content(
     filename: str,
     content: bytes,
     use_llm: bool,
     session: AsyncSession,
 ) -> CandidateRecord:
+    """
+    Parses CV content, creates or updates the candidate, and stores its embedding.
+    """
     filename = _validate_cv_filename(filename)
     text = extract_text(filename, content)
 
@@ -140,8 +245,12 @@ async def _create_candidate_from_content(
         try:
             esco = await get_esco_extractor()
             esco_result = await esco.extract_skills(text, top_k=20)
-            esco_skills = {m.skill.title.lower() for m in esco_result.skills}
-            existing_skills = set(s.lower() for s in profile.skills)
+            esco_skills = {
+                normalize_skill_name(m.skill.title)
+                for m in esco_result.skills
+                if _esco_skill_has_text_evidence(m.skill.title, text)
+            }
+            existing_skills = {normalize_skill_name(s) for s in profile.skills}
             new_from_esco = [s for s in esco_skills if s not in existing_skills]
             if new_from_esco:
                 profile.skills.extend(sorted(new_from_esco))
@@ -157,69 +266,37 @@ async def _create_candidate_from_content(
 
     if existing_candidate:
         logger.info(
-            "Candidate already exists, returning existing",
+            "Candidate already exists, updating from new CV",
             extra={"email": profile.email, "candidate_id": existing_candidate.id},
         )
+        _apply_profile_to_candidate(existing_candidate, profile)
+        await session.commit()
+        _delete_cv_files(existing_candidate.id)
         _save_cv_file(existing_candidate.id, filename, content)
+        try:
+            await _upsert_candidate_embedding(session, existing_candidate.id, profile)
+        except Exception:
+            logger.warning(
+                "Embedding update failed for existing candidate %s - candidate data saved",
+                existing_candidate.id,
+            )
         cv_url = f"/api/v1/candidates/{existing_candidate.id}/cv"
         return CandidateRecord(
             candidate_id=existing_candidate.id,
             cv_url=cv_url,
-            full_name=existing_candidate.full_name,
-            email=existing_candidate.email,
-            phone=existing_candidate.phone,
-            skills=existing_candidate.skills,
-            skills_detailed=existing_candidate.skills_detailed or [],
-            experience=existing_candidate.experience,
-            experience_entries=existing_candidate.experience_entries or [],
-            education=existing_candidate.education,
-            education_entries=existing_candidate.education_entries or [],
-            projects=existing_candidate.projects,
-            negative_skills=existing_candidate.negative_skills or [],
-            learning_skills=existing_candidate.learning_skills or [],
-            total_years_experience=existing_candidate.total_years_experience,
-            raw_text=existing_candidate.raw_text,
+            **profile.model_dump(),
         )
 
     candidate_id = str(uuid.uuid4())
-    candidate = Candidate(
-        id=candidate_id,
-        full_name=profile.full_name,
-        email=profile.email,
-        phone=profile.phone,
-        skills=profile.skills,
-        skills_detailed=[s.model_dump() for s in profile.skills_detailed] if profile.skills_detailed else None,
-        experience=profile.experience,
-        experience_entries=[e.model_dump() for e in profile.experience_entries] if profile.experience_entries else None,
-        education=profile.education,
-        education_entries=[e.model_dump() for e in profile.education_entries] if profile.education_entries else None,
-        projects=profile.projects,
-        negative_skills=profile.negative_skills or None,
-        learning_skills=profile.learning_skills or None,
-        total_years_experience=profile.total_years_experience,
-        raw_text=profile.raw_text,
-    )
+    candidate = Candidate(id=candidate_id)
+    _apply_profile_to_candidate(candidate, profile)
     session.add(candidate)
     await session.commit()
 
     _save_cv_file(candidate_id, filename, content)
 
-    parts = []
-    if profile.skills:
-        parts.append(f"Skills: {', '.join(profile.skills)}")
-    if profile.experience:
-        parts.append(f"Experience: {' '.join(profile.experience[:10])}")
-    if profile.education:
-        parts.append(f"Education: {' '.join(profile.education[:5])}")
-    if profile.projects:
-        parts.append(f"Projects: {' '.join(profile.projects[:5])}")
-    embedding_text = ". ".join(parts) if parts else profile.raw_text
-
     try:
-        embedder = get_embedding_service()
-        embedding = (await embedder.embed([embedding_text]))[0]
-        store = VectorStore(session)
-        await store.upsert_embedding("candidate", candidate_id, embedding)
+        await _upsert_candidate_embedding(session, candidate_id, profile)
     except Exception:
         logger.warning(
             "Embedding generation failed for candidate %s — candidate created without vector",
@@ -235,6 +312,9 @@ async def _create_candidate_from_upload(
     use_llm: bool,
     session: AsyncSession,
 ) -> CandidateRecord:
+    """
+    Reads an uploaded CV and creates or updates the candidate record.
+    """
     content = await _read_upload_content(file)
     return await _create_candidate_from_content(
         filename=file.filename or "cv.txt",
@@ -248,6 +328,9 @@ async def _create_candidate_from_upload(
 async def list_skill_categories(
     _: User = Depends(require_any_role("owner", "admin", "recruiter")),
 ) -> dict[str, list[str]]:
+    """
+    Returns the skill catalog grouped by category.
+    """
     return get_categories()
 
 
@@ -255,6 +338,9 @@ async def list_skill_categories(
 async def list_all_skills(
     _: User = Depends(require_any_role("owner", "admin", "recruiter")),
 ) -> list[str]:
+    """
+    Returns all known skill names from the catalog.
+    """
     return SKILL_KEYWORDS
 
 
@@ -268,6 +354,9 @@ async def create_candidate(
     _: User = Depends(require_any_role("owner", "admin", "recruiter", "candidate")),
     session: AsyncSession = Depends(get_db_session),
 ) -> CandidateRecord:
+    """
+    Handles a synchronous candidate CV upload.
+    """
     try:
         return await _create_candidate_from_upload(file=file, use_llm=use_llm, session=session)
     except ValueError as exc:
@@ -284,6 +373,9 @@ async def create_candidate_async(
     use_llm: bool = Query(default=True),
     _: User = Depends(require_any_role("owner", "admin", "recruiter", "candidate")),
 ) -> dict[str, str]:
+    """
+    Queues a candidate CV upload for background processing.
+    """
     try:
         content = await _read_upload_content(file)
         task_id = str(uuid.uuid4())
@@ -305,6 +397,9 @@ async def get_async_result(
     task_id: str,
     _: User = Depends(require_any_role("owner", "admin", "recruiter", "candidate")),
 ) -> dict:
+    """
+    Returns the result of a queued candidate CV processing task.
+    """
     from app.services.task_queue import get_task_result
     result = await get_task_result(task_id)
     if result is None:
@@ -330,6 +425,9 @@ async def list_candidates(
     _: User = Depends(require_any_role("owner", "admin", "recruiter")),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[CandidateRecord]:
+    """
+    Lists candidates with filtering, sorting, and pagination.
+    """
     if skill_logic not in {"and", "or"}:
         raise HTTPException(status_code=400, detail="skill_logic must be 'and' or 'or'")
     if sort_dir not in {"asc", "desc"}:
@@ -352,7 +450,7 @@ async def list_candidates(
             full_name=candidate.full_name,
             email=candidate.email,
             phone=candidate.phone,
-            skills=candidate.skills,
+            skills=_candidate_display_skills(candidate),
             experience=candidate.experience,
             education=candidate.education,
             education_entries=candidate.education_entries or [],
@@ -376,22 +474,16 @@ async def list_candidates(
         ]
 
     if skills:
-        skill_list = [s.strip().lower() for s in skills.split(",") if s.strip()]
+        skill_list = [normalize_skill_name(s) for s in skills.split(",") if s.strip()]
         if skill_logic == "or":
             records = [
                 r for r in records
-                if any(
-                    any(skill_lower in cs.lower() for cs in r.skills)
-                    for skill_lower in skill_list
-                )
+                if any(skill_lower in {normalize_skill_name(cs) for cs in r.skills} for skill_lower in skill_list)
             ]
         else:
             records = [
                 r for r in records
-                if all(
-                    any(skill_lower in cs.lower() for cs in r.skills)
-                    for skill_lower in skill_list
-                )
+                if all(skill_lower in {normalize_skill_name(cs) for cs in r.skills} for skill_lower in skill_list)
             ]
 
     if min_years is not None and min_years < 0:
@@ -441,6 +533,9 @@ async def list_candidates(
         records.sort(key=lambda r: len(r.skills), reverse=(sort_dir == "desc"))
     elif sort_by == "education":
         def _edu_score(r: CandidateRecord) -> int:
+            """
+            Scores education level for candidate sorting.
+            """
             for entry in r.education_entries:
                 deg = (entry.get("degree", "") or "").lower()
                 if "phd" in deg or "doctor" in deg:
@@ -474,6 +569,9 @@ async def get_my_candidate_profile(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> CandidateRecord:
+    """
+    Returns the candidate profile linked to the current user email.
+    """
     stmt = select(Candidate).where(Candidate.email == current_user.email)
     result = await session.execute(stmt)
     candidate = result.scalars().first()
@@ -486,7 +584,7 @@ async def get_my_candidate_profile(
         full_name=candidate.full_name,
         email=candidate.email,
         phone=candidate.phone,
-        skills=candidate.skills,
+        skills=_candidate_display_skills(candidate),
         skills_detailed=candidate.skills_detailed or [],
         experience=candidate.experience,
         experience_entries=candidate.experience_entries or [],
@@ -506,6 +604,9 @@ async def get_candidate(
     current_user: User = Depends(require_any_role("owner", "admin", "recruiter", "candidate")),
     session: AsyncSession = Depends(get_db_session),
 ) -> CandidateRecord:
+    """
+    Returns one candidate profile after access checks.
+    """
     await ensure_candidate_access(session, current_user, candidate_id)
     stmt = select(Candidate).where(Candidate.id == candidate_id)
     result = await session.execute(stmt)
@@ -519,7 +620,7 @@ async def get_candidate(
         full_name=candidate.full_name,
         email=candidate.email,
         phone=candidate.phone,
-        skills=candidate.skills,
+        skills=_candidate_display_skills(candidate),
         skills_detailed=candidate.skills_detailed or [],
         experience=candidate.experience,
         experience_entries=candidate.experience_entries or [],
@@ -540,6 +641,9 @@ async def preview_cv(
     current_user: User = Depends(require_any_role("owner", "admin", "recruiter", "candidate")),
     session: AsyncSession = Depends(get_db_session),
 ) -> PlainTextResponse | FileResponse:
+    """
+    Returns extracted CV text or the stored CV file for download.
+    """
     await ensure_candidate_access(session, current_user, candidate_id)
     stmt = select(Candidate).where(Candidate.id == candidate_id)
     result = await session.execute(stmt)
@@ -577,6 +681,9 @@ async def delete_candidate(
     _: User = Depends(require_any_role("owner", "admin", "recruiter")),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, str]:
+    """
+    Deletes a candidate and all dependent records.
+    """
     stmt = select(Candidate).where(Candidate.id == candidate_id)
     result = await session.execute(stmt)
     candidate = result.scalar_one_or_none()
@@ -606,6 +713,9 @@ async def delete_all_candidates(
     _: User = Depends(require_any_role("owner", "admin")),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, str | int]:
+    """
+    Deletes all candidates and their dependent records.
+    """
     cand_stmt = select(Candidate)
     cand_result = await session.execute(cand_stmt)
     candidates = cand_result.scalars().all()
@@ -634,6 +744,9 @@ async def stream_candidates(
     use_llm: bool = Query(default=True, description="Use LLM (Ollama) for enhanced CV parsing"),
     _: User = Depends(require_any_role("owner", "admin", "recruiter")),
 ) -> StreamingResponse:
+    """
+    Streams results while uploading and parsing multiple CV files.
+    """
     prepared_files: list[tuple[str, bytes]] = []
     for file in files:
         try:
@@ -643,6 +756,9 @@ async def stream_candidates(
             logger.warning("Rejected CV in stream upload", extra={"cv_filename": file.filename, "error": str(exc)})
 
     async def event_stream():
+        """
+        Yields one NDJSON result per streamed CV upload.
+        """
         for filename, content in prepared_files:
             try:
                 if not content:

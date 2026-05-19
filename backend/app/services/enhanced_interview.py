@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 
 
 def _skill_to_category(skill: str) -> str:
+    """
+    Maps a skill name to a broad interview category.
+    """
     skill_lower = skill.lower().strip()
     if skill_lower in ("general", "behavioral", "communication", "teamwork", "leadership", "agile", "scrum"):
         return "Behavioral"
@@ -40,6 +43,9 @@ def _skill_to_category(skill: str) -> str:
 
 
 def _get_hint_for_skill(skill: str, difficulty: str) -> str:
+    """
+    Builds a short expected-answer hint for a skill and difficulty.
+    """
     hints = {
         "python": "Discuss key language features, syntax, and common use cases.",
         "fastapi": "Focus on async patterns, dependency injection, and Pydantic integration.",
@@ -60,6 +66,9 @@ def _get_hint_for_skill(skill: str, difficulty: str) -> str:
 
 
 def _get_evaluation_criteria(skill: str) -> list[str]:
+    """
+    Builds default evaluation criteria for a skill.
+    """
     return [
         f"Understanding of {skill} concepts",
         f"Practical experience with {skill}",
@@ -69,6 +78,9 @@ def _get_evaluation_criteria(skill: str) -> list[str]:
 
 
 def _get_tags(skill: str) -> list[str]:
+    """
+    Builds searchable tags for an interview question.
+    """
     skill_lower = skill.lower().strip()
     tags = [skill_lower]
     for category, skills in SKILL_CATEGORIES.items():
@@ -81,10 +93,16 @@ def _get_tags(skill: str) -> list[str]:
 
 class EnhancedInterviewService:
     def __init__(self, use_llm: bool = True) -> None:
+        """
+        Initializes the enhanced interview service with optional LLM evaluation.
+        """
         self.use_llm = use_llm
         self._llm_service = None
 
     def _get_llm_service(self) -> Any:
+        """
+        Lazily creates the LLM service for answer evaluation.
+        """
         if self._llm_service is None and self.use_llm:
             self._llm_service = get_bilingual_llm_service()
         return self._llm_service
@@ -95,6 +113,9 @@ class EnhancedInterviewService:
         candidate_id: str,
         job_id: str,
     ) -> tuple[list[QuestionItem], Candidate, Job]:
+        """
+        Loads candidate and job records and enriches grounded interview questions.
+        """
         cand_stmt = select(Candidate).where(Candidate.id == candidate_id)
         cand_result = await session.execute(cand_stmt)
         candidate = cand_result.scalar_one_or_none()
@@ -125,6 +146,9 @@ class EnhancedInterviewService:
         job_id: str,
         candidate_id: str,
     ) -> tuple[InterviewSessionModel, str | None, str | None]:
+        """
+        Creates an interview session with enriched questions.
+        """
         questions, candidate, job = await self.generate_questions(session, candidate_id, job_id)
 
         interview = InterviewSessionModel(
@@ -149,6 +173,9 @@ class EnhancedInterviewService:
         skill: str,
         difficulty: str = "mid",
     ) -> dict[str, Any]:
+        """
+        Evaluates an answer with the LLM and falls back to rule-based scoring.
+        """
         llm_service = self._get_llm_service()
 
         if llm_service is None or not self.use_llm:
@@ -181,13 +208,16 @@ class EnhancedInterviewService:
     def _evaluate_rule_based(
         self, question: str, answer: str, skill: str
     ) -> dict[str, Any]:
+        """
+        Scores an interview answer with simple local heuristics.
+        """
         if not answer or len(answer.strip()) < 10:
             return {
                 "score": 0.1,
-                "feedback": f"الإجابة قصيرة جداً. يرجى تقديم مزيد من التفاصيل حول {skill}.",
-                "language_detected": "arabic",
+                "feedback": f"Answer is too short. Please provide more details about {skill}.",
+                "language_detected": "english",
                 "strengths": [],
-                "weaknesses": ["الإجابة غير كافية"],
+                "weaknesses": ["Answer too short"],
                 "technical_accuracy": 0.1,
                 "completeness": 0.1,
                 "clarity": 0.3,
@@ -197,8 +227,6 @@ class EnhancedInterviewService:
         answer_lower = answer.lower()
         words = answer_lower.split()
         word_count = len(words)
-
-        has_arabic = any("\u0600" <= c <= "\u06FF" for c in answer)
 
         skill_keywords = set(skill.lower().split())
         keyword_matches = sum(1 for kw in skill_keywords if kw in answer_lower)
@@ -250,32 +278,16 @@ class EnhancedInterviewService:
 
         score = round(min(1.0, length_score + keyword_score + tech_score + 0.1), 4)
 
-        language = "arabic" if has_arabic else "english"
+        language = "english"
 
         if score >= 0.85:
-            feedback = (
-                f"ممتاز! فهم قوي جداً لـ {skill}. الإجابة واضحة ودقيقة."
-                if has_arabic
-                else f"Excellent! Strong understanding of {skill}. Clear and accurate explanation."
-            )
+            feedback = f"Excellent! Strong understanding of {skill}. Clear and accurate explanation."
         elif score >= 0.65:
-            feedback = (
-                f"جيد! معرفة جيدة بـ {skill}. يمكنك إضافة المزيد من التفاصيل."
-                if has_arabic
-                else f"Good! Solid knowledge of {skill}. Could expand on some details."
-            )
+            feedback = f"Good! Solid knowledge of {skill}. Could expand on some details."
         elif score >= 0.45:
-            feedback = (
-                f"متوسط. فهم أساسي لـ {skill}. تحتاج إلى تعميق المعرفة التقنية."
-                if has_arabic
-                else f"Average. Basic understanding of {skill}. Needs to deepen technical knowledge."
-            )
+            feedback = f"Average. Basic understanding of {skill}. Needs to deepen technical knowledge."
         else:
-            feedback = (
-                f"ضعيف. فهم محدود لـ {skill}. يُنصح بمزيد من الدراسة."
-                if has_arabic
-                else f"Weak. Limited understanding of {skill}. Recommend further study."
-            )
+            feedback = f"Weak. Limited understanding of {skill}. Recommend further study."
 
         return {
             "score": score,
@@ -295,7 +307,11 @@ class EnhancedInterviewService:
         session_id: str,
         question_id: str,
         answer: str,
+        use_llm: bool | None = None,
     ) -> dict[str, Any]:
+        """
+        Stores one answer, its evaluation, and updated chat history.
+        """
         stmt = select(InterviewSessionModel).where(InterviewSessionModel.id == session_id)
         result = await session.execute(stmt)
         interview = result.scalar_one_or_none()
@@ -314,12 +330,20 @@ class EnhancedInterviewService:
         if expected_question.id != question_id:
             raise ValueError("Answer does not match the current question")
 
-        evaluation = await self.evaluate_answer_with_llm(
-            question=question_item.question,
-            answer=answer,
-            skill=question_item.skill,
-            difficulty=question_item.difficulty,
-        )
+        should_use_llm = self.use_llm if use_llm is None else use_llm
+        if should_use_llm:
+            evaluation = await self.evaluate_answer_with_llm(
+                question=question_item.question,
+                answer=answer,
+                skill=question_item.skill,
+                difficulty=question_item.difficulty,
+            )
+        else:
+            evaluation = self._evaluate_rule_based(
+                question=question_item.question,
+                answer=answer,
+                skill=question_item.skill,
+            )
 
         evaluations = list(interview.evaluations or [])
         chat_history = list(interview.chat_history or [])
@@ -340,6 +364,10 @@ class EnhancedInterviewService:
                 "score": evaluation["score"],
                 "feedback": evaluation["feedback"],
                 "language_detected": evaluation.get("language_detected", "english"),
+                "strengths": evaluation.get("strengths", []),
+                "weaknesses": evaluation.get("weaknesses", []),
+                "using_llm": evaluation.get("using_llm", False),
+                "evaluation_status": "completed" if should_use_llm else "quick",
             }
         )
 
@@ -365,6 +393,7 @@ class EnhancedInterviewService:
             "strengths": evaluation.get("strengths", []),
             "weaknesses": evaluation.get("weaknesses", []),
             "using_llm": evaluation.get("using_llm", False),
+            "evaluation_status": "completed" if should_use_llm else "quick",
         }
 
     async def generate_followup(
@@ -374,6 +403,9 @@ class EnhancedInterviewService:
         skill: str,
         score: float,
     ) -> dict[str, Any]:
+        """
+        Generates a follow-up question or a safe local fallback.
+        """
         llm_service = self._get_llm_service()
 
         if llm_service is None or not self.use_llm:
@@ -403,6 +435,9 @@ class EnhancedInterviewService:
         session: AsyncSession,
         session_id: str,
     ) -> dict[str, Any]:
+        """
+        Aggregates all interview answer evaluations into a session summary.
+        """
         stmt = select(InterviewSessionModel).where(InterviewSessionModel.id == session_id)
         result = await session.execute(stmt)
         interview = result.scalar_one_or_none()
@@ -439,34 +474,17 @@ class EnhancedInterviewService:
             key=lambda s: skill_avgs[s],
         )
 
-        is_arabic = "arabic" in languages_used
-
         if overall_score >= 0.8:
-            feedback = (
-                "أداء ممتاز! معرفة تقنية قوية في معظم المجالات."
-                if is_arabic
-                else "Excellent performance! Strong technical knowledge across most areas."
-            )
+            feedback = "Excellent performance! Strong technical knowledge across most areas."
         elif overall_score >= 0.6:
-            feedback = (
-                "أداء جيد. أساس تقني متين مع بعض المجالات التي تحتاج تحسين."
-                if is_arabic
-                else "Good performance. Solid technical foundation with some areas for improvement."
-            )
+            feedback = "Good performance. Solid technical foundation with some areas for improvement."
         elif overall_score >= 0.4:
-            feedback = (
-                "أداء متوسط. يحتاج إلى تحسين في عدة مجالات تقنية."
-                if is_arabic
-                else "Average performance. Needs improvement in several technical areas."
-            )
+            feedback = "Average performance. Needs improvement in several technical areas."
         else:
-            feedback = (
-                "أداء دون المتوسط. فجوات كبيرة في المعرفة التقنية."
-                if is_arabic
-                else "Below average performance. Significant gaps in technical knowledge."
-            )
+            feedback = "Below average performance. Significant gaps in technical knowledge."
 
-        interview.status = "evaluated"
+        if interview.status != "analyzing":
+            interview.status = "evaluated"
         await session.commit()
 
         return {
@@ -483,8 +501,14 @@ class EnhancedInterviewService:
 
 
 def get_enhanced_interview_service() -> EnhancedInterviewService:
+    """
+    Creates an interview service with LLM evaluation enabled.
+    """
     return EnhancedInterviewService(use_llm=True)
 
 
 def get_simple_interview_service() -> EnhancedInterviewService:
+    """
+    Creates an interview service with LLM evaluation disabled.
+    """
     return EnhancedInterviewService(use_llm=False)

@@ -11,7 +11,7 @@ import numpy as np
 
 from app.core.config import settings
 from app.schemas.esco import EscoExtractionResult, EscoSkill, EscoSkillMatch
-from app.services.embedding import EmbeddingProvider
+from app.services.embedding import EmbeddingProvider, embedding_metadata_for_text
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +20,7 @@ CACHE_DIR = Path(settings.cv_storage_path).parent / "esco_cache"
 CACHE_FILE = CACHE_DIR / "esco_skills.json"
 EMBEDDINGS_FILE = CACHE_DIR / "esco_embeddings.npy"
 SKILLS_LIST_FILE = CACHE_DIR / "esco_skills_list.json"
+EMBEDDINGS_META_FILE = CACHE_DIR / "esco_embeddings_meta.json"
 
 DEFAULT_BATCH_SIZE = 100
 DEFAULT_THRESHOLD = 0.55
@@ -37,6 +38,9 @@ TECH_SKILL_FILTER = {
 
 class EscoSkillExtractor:
     def __init__(self, threshold: float = DEFAULT_THRESHOLD) -> None:
+        """
+        Initializes the ESCO semantic extractor and cache state.
+        """
         self.threshold = threshold
         self._skills: list[EscoSkill] = []
         self._embeddings: np.ndarray | None = None
@@ -47,6 +51,9 @@ class EscoSkillExtractor:
     async def extract_skills(
         self, text: str, top_k: int = DEFAULT_TOP_K
     ) -> EscoExtractionResult:
+        """
+        Extracts likely ESCO skills from text using embedding similarity.
+        """
         if not self._skills:
             await self._load_or_fetch()
 
@@ -92,6 +99,9 @@ class EscoSkillExtractor:
         )
 
     async def skill_count(self) -> int:
+        """
+        Returns the number of loaded ESCO skills.
+        """
         if not self._skills:
             await self._load_or_fetch()
         return len(self._skills)
@@ -99,6 +109,9 @@ class EscoSkillExtractor:
     # ── Fetch from ESCO API ────────────────────────────────────
 
     async def fetch_and_cache(self) -> int:
+        """
+        Downloads ESCO skills from the API and stores them locally.
+        """
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         skills: list[dict[str, Any]] = []
         offset = 0
@@ -155,6 +168,9 @@ class EscoSkillExtractor:
     # ── Cache management ───────────────────────────────────────
 
     async def _load_or_fetch(self) -> None:
+        """
+        Loads cached ESCO skills or fetches them when the cache is missing.
+        """
         if CACHE_FILE.exists():
             try:
                 with open(CACHE_FILE, "r", encoding="utf-8") as f:
@@ -174,6 +190,9 @@ class EscoSkillExtractor:
             logger.error("Failed to fetch any ESCO skills")
 
     async def _compute_embeddings(self) -> None:
+        """
+        Computes and caches embeddings for loaded ESCO skill titles.
+        """
         if self._embeddings is not None:
             return
         if not self._skills:
@@ -190,20 +209,48 @@ class EscoSkillExtractor:
             np.save(str(EMBEDDINGS_FILE), self._embeddings)
             with open(SKILLS_LIST_FILE, "w", encoding="utf-8") as f:
                 json.dump(titles, f)
+            with open(EMBEDDINGS_META_FILE, "w", encoding="utf-8") as f:
+                json.dump(embedding_metadata_for_text("\n".join(titles)), f)
             logger.info("ESCO embeddings computed and cached")
         except Exception as e:
             logger.error(f"ESCO embedding computation failed: {e}")
-            self._embeddings = np.zeros((len(self._skills), 384), dtype=np.float32)
+            self._embeddings = np.zeros((len(self._skills), settings.embedding_dimension), dtype=np.float32)
 
     async def _load_embeddings(self) -> None:
-        if EMBEDDINGS_FILE.exists() and SKILLS_LIST_FILE.exists():
+        """
+        Loads cached ESCO embeddings when metadata and shape still match.
+        """
+        if EMBEDDINGS_FILE.exists() and SKILLS_LIST_FILE.exists() and EMBEDDINGS_META_FILE.exists():
             try:
-                self._embeddings = np.load(str(EMBEDDINGS_FILE))
+                cached = np.load(str(EMBEDDINGS_FILE))
+                with open(SKILLS_LIST_FILE, "r", encoding="utf-8") as f:
+                    cached_titles = json.load(f)
+                with open(EMBEDDINGS_META_FILE, "r", encoding="utf-8") as f:
+                    cached_metadata = json.load(f)
+                expected_shape = (len(self._skills), settings.embedding_dimension)
+                if cached.shape != expected_shape:
+                    logger.warning(
+                        "Ignoring stale ESCO embeddings cache with shape %s; expected %s",
+                        cached.shape,
+                        expected_shape,
+                    )
+                    self._embeddings = None
+                    return
+                expected_metadata = embedding_metadata_for_text("\n".join(cached_titles))
+                if cached_metadata != expected_metadata:
+                    logger.warning("Ignoring ESCO embeddings cache from a different provider/model/source list")
+                    self._embeddings = None
+                    return
+                self._embeddings = cached.astype(np.float32, copy=False)
                 logger.info("Loaded ESCO embeddings from cache")
             except Exception as e:
                 logger.warning(f"Failed to load ESCO embeddings: {e}")
+                self._embeddings = None
 
     def _get_embedding_service(self):
+        """
+        Lazily creates the embedding service used by ESCO extraction.
+        """
         if self._embedding_service is None:
             from app.services.embedding import get_embedding_service
             self._embedding_service = get_embedding_service()
@@ -213,6 +260,9 @@ class EscoSkillExtractor:
 # ── Helpers ────────────────────────────────────────────────────
 
 def _get_skill_type(item: dict) -> str | None:
+    """
+    Extracts the ESCO skill type from an API item.
+    """
     types = item.get("hasSkillType", [])
     if types:
         uri = types[0]
@@ -221,6 +271,9 @@ def _get_skill_type(item: dict) -> str | None:
 
 
 def _get_reuse_level(item: dict) -> str | None:
+    """
+    Extracts the ESCO reuse level from an API item.
+    """
     levels = item.get("hasReuseLevel", [])
     if levels:
         uri = levels[0]
@@ -229,6 +282,9 @@ def _get_reuse_level(item: dict) -> str | None:
 
 
 def _get_broader_titles(item: dict) -> list[str]:
+    """
+    Extracts readable broader-skill titles from ESCO URIs.
+    """
     broader = item.get("broaderSkill", [])
     titles: list[str] = []
     for b in broader:
@@ -243,6 +299,9 @@ _extractor_instance: EscoSkillExtractor | None = None
 
 
 async def get_esco_extractor() -> EscoSkillExtractor:
+    """
+    Creates or returns the cached ESCO extractor instance.
+    """
     global _extractor_instance
     if _extractor_instance is None:
         _extractor_instance = EscoSkillExtractor()

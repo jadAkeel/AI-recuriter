@@ -13,6 +13,9 @@ logger = logging.getLogger(__name__)
 
 
 async def _send_email_smtp(to_email: str, subject: str, html_body: str) -> bool:
+    """
+    Sends an HTML email through the configured SMTP server.
+    """
     if not settings.smtp_host or not settings.smtp_port:
         logger.warning("SMTP not configured. Email not sent.")
         return False
@@ -34,6 +37,9 @@ async def _send_email_smtp(to_email: str, subject: str, html_body: str) -> bool:
         msg.attach(MIMEText(html_body, "html"))
 
         def _send():
+            """
+            Sends the email through blocking SMTP calls in a worker thread.
+            """
             with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=30) as server:
                 if settings.smtp_tls:
                     server.starttls()
@@ -50,6 +56,9 @@ async def _send_email_smtp(to_email: str, subject: str, html_body: str) -> bool:
 
 
 def _log_email(to_email: str, subject: str, body: str) -> None:
+    """
+    Logs an email body when SMTP delivery is not configured.
+    """
     logger.info(
         "--- EMAIL (dev mode) ---\nTo: %s\nSubject: %s\nBody:\n%s\n--- END EMAIL ---",
         to_email, subject, body,
@@ -63,6 +72,9 @@ async def send_interview_invitation(
     session_id: str,
     base_url: str = "",
 ) -> bool:
+    """
+    Sends or logs an interview invitation email.
+    """
     safe_candidate_name = html.escape(candidate_name or "Candidate")
     safe_job_title = html.escape(job_title or "Position")
     root_url = base_url.rstrip("/")
@@ -112,6 +124,9 @@ async def send_interview_results(
     strengths: list[str],
     weaknesses: list[str],
 ) -> bool:
+    """
+    Sends interview results.
+    """
     safe_candidate_name = html.escape(candidate_name or "Candidate")
     safe_job_title = html.escape(job_title or "Position")
     safe_strengths = [html.escape(item) for item in strengths[:10]]

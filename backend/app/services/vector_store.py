@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 
 class VectorStore:
     def __init__(self, session: AsyncSession) -> None:
+        """
+        Initializes vector storage around the active database session.
+        """
         self.session = session
         self.is_postgres = db.engine.dialect.name == "postgresql"
 
@@ -27,6 +30,9 @@ class VectorStore:
         metadata: dict[str, Any] | None = None,
         commit: bool = True,
     ) -> None:
+        """
+        Creates or updates an embedding row for an entity.
+        """
         self._validate_embedding_dimension(embedding)
         stmt = select(Embedding).where(
             Embedding.entity_type == entity_type,
@@ -39,11 +45,17 @@ class VectorStore:
             row = Embedding(
                 entity_type=entity_type,
                 entity_id=entity_id,
+                provider=(metadata or {}).get("provider"),
+                model_name=(metadata or {}).get("model_name"),
+                source_hash=(metadata or {}).get("source_hash"),
                 embedding_json=embedding,
                 embedding_vector=embedding,
             )
             self.session.add(row)
         else:
+            row.provider = (metadata or {}).get("provider")
+            row.model_name = (metadata or {}).get("model_name")
+            row.source_hash = (metadata or {}).get("source_hash")
             row.embedding_json = embedding
             row.embedding_vector = embedding
 
@@ -56,6 +68,9 @@ class VectorStore:
         embedding: list[float],
         top_k: int = 5,
     ) -> list[tuple[str, float]]:
+        """
+        Finds the most similar stored embeddings for an entity type.
+        """
         self._validate_embedding_dimension(embedding)
         if np.linalg.norm(np.array(embedding, dtype=np.float32)) == 0:
             return []
@@ -70,6 +85,9 @@ class VectorStore:
         embedding: list[float],
         top_k: int,
     ) -> list[tuple[str, float]]:
+        """
+        Queries PostgreSQL pgvector for nearest embeddings.
+        """
         if Embedding.embedding_vector is None:
             logger.warning("Vector column unavailable, falling back to in-memory scoring")
             return await self._query_in_memory(entity_type, embedding, top_k)
@@ -90,6 +108,9 @@ class VectorStore:
         embedding: list[float],
         top_k: int,
     ) -> list[tuple[str, float]]:
+        """
+        Computes cosine similarity in Python for non-pgvector databases.
+        """
         stmt = select(Embedding.entity_id, Embedding.embedding_json).where(
             Embedding.entity_type == entity_type
         )
@@ -131,4 +152,7 @@ class VectorStore:
         return [(valid_rows[i][0], float(scores[i])) for i in top_indices]
 
     def _validate_embedding_dimension(self, embedding: list[float]) -> None:
+        """
+        Validates an embedding before storage or similarity search.
+        """
         validate_embedding_vector(embedding)

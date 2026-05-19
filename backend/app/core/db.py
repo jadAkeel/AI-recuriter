@@ -12,6 +12,9 @@ from app.models.base import Base
 logger = logging.getLogger(__name__)
 
 def _create_engine() -> AsyncEngine:
+    """
+    Creates the async database engine from current settings.
+    """
     url = str(settings.database_url)
     connect_args = {}
     # Enable WAL mode for SQLite to allow concurrent reads during writes
@@ -27,6 +30,7 @@ def _create_engine() -> AsyncEngine:
     )
 
 
+# Global async engine and session factory
 engine: AsyncEngine = _create_engine()
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
@@ -44,11 +48,17 @@ def reset_engine() -> None:
 
 
 async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
+    """
+    Yields an async database session for dependency injection.
+    """
     async with SessionLocal() as session:
         yield session
 
 
 async def check_db_connection() -> bool:
+    """
+    Checks whether the database responds to a simple query.
+    """
     try:
         async with engine.connect() as connection:
             await connection.execute(text("SELECT 1"))
@@ -60,6 +70,9 @@ async def check_db_connection() -> bool:
 
 async def init_db() -> None:
     # Import models here to avoid circular imports (models reference db, db references models)
+    """
+    Creates database tables and validates embedding schema requirements.
+    """
     import app.models.candidate  # noqa: F401
     import app.models.embedding  # noqa: F401
     import app.models.interview  # noqa: F401
@@ -76,6 +89,7 @@ async def init_db() -> None:
         if engine.dialect.name == "postgresql":
             await connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         await connection.run_sync(Base.metadata.create_all)
+        await _ensure_embedding_metadata_columns(connection)
         if engine.dialect.name == "postgresql":
             result = await connection.execute(text("""
                 SELECT format_type(a.atttypid, a.atttypmod)
@@ -95,3 +109,29 @@ async def init_db() -> None:
                     f"database has {vector_type}, settings expect {expected_type}. "
                     "Run a migration or set EMBEDDING_DIMENSION to the existing schema."
                 )
+
+
+async def _ensure_embedding_metadata_columns(connection) -> None:
+    """
+    Adds missing embedding metadata columns for older databases.
+    """
+    columns = {
+        "provider": "VARCHAR(50)",
+        "model_name": "VARCHAR(255)",
+        "source_hash": "VARCHAR(64)",
+    }
+    if engine.dialect.name == "sqlite":
+        result = await connection.execute(text("PRAGMA table_info(embeddings)"))
+        existing = {row[1] for row in result.fetchall()}
+    else:
+        result = await connection.execute(text("""
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name = 'embeddings'
+              AND table_schema = current_schema()
+        """))
+        existing = {row[0] for row in result.fetchall()}
+
+    for column, column_type in columns.items():
+        if column not in existing:
+            await connection.execute(text(f"ALTER TABLE embeddings ADD COLUMN {column} {column_type}"))

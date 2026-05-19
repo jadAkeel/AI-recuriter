@@ -9,6 +9,9 @@ from app.models.candidate import Candidate
 
 
 def test_register_and_login() -> None:
+    """
+    Checks that register and login.
+    """
     app = create_app()
     with TestClient(app) as client:
         email = f"test-{uuid.uuid4().hex[:8]}@example.com"
@@ -39,6 +42,9 @@ def test_register_and_login() -> None:
 
 
 def test_candidate_can_only_read_own_candidate_profile() -> None:
+    """
+    Checks that candidate can only read own candidate profile.
+    """
     app = create_app()
     with TestClient(app) as client:
         email = f"candidate-{uuid.uuid4().hex[:8]}@example.com"
@@ -53,6 +59,10 @@ def test_candidate_can_only_read_own_candidate_profile() -> None:
         other_id = str(uuid.uuid4())
 
         async def _seed_candidates() -> None:
+            """
+            Supports the surrounding test for test candidate can only read own candidate
+            profile.
+            """
             await init_db()
             async with SessionLocal() as session:
                 session.add(Candidate(

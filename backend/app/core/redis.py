@@ -12,6 +12,9 @@ _redis = None
 
 
 async def get_redis():
+    """
+    Returns a Redis client when Redis is available.
+    """
     global _redis
     if _redis is None:
         try:
@@ -26,6 +29,9 @@ async def get_redis():
 
 
 async def cache_get(key: str) -> Any | None:
+    """
+    Reads and JSON-decodes a value from Redis cache.
+    """
     r = await get_redis()
     if r is None:
         return None
@@ -37,6 +43,9 @@ async def cache_get(key: str) -> Any | None:
 
 
 async def cache_set(key: str, value: Any, ttl: int = 300) -> None:
+    """
+    JSON-encodes and stores a value in Redis cache.
+    """
     r = await get_redis()
     if r is None:
         return
@@ -47,6 +56,9 @@ async def cache_set(key: str, value: Any, ttl: int = 300) -> None:
 
 
 async def cache_delete(key: str) -> None:
+    """
+    Deletes a value from Redis cache.
+    """
     r = await get_redis()
     if r is None:
         return
@@ -57,6 +69,9 @@ async def cache_delete(key: str) -> None:
 
 
 async def close_redis() -> None:
+    """
+    Closes the cached Redis connection.
+    """
     global _redis
     if _redis:
         close_func = getattr(_redis, "aclose", None) or getattr(_redis, "close", None)

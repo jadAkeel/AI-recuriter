@@ -11,6 +11,7 @@ from app.models.candidate import Candidate
 from app.models.interview import InterviewSession as InterviewSessionModel
 from app.models.job import Job
 from app.schemas.interview import AnswerResponse, QuestionItem
+from app.services.skill_catalog import normalize_skill_name
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +116,9 @@ FEEDBACK_TEMPLATES = {
 
 
 def _get_questions_for_skill(skill: str, seniority: str) -> list[dict[str, str]]:
+    """
+    Selects template questions that match a skill and seniority level.
+    """
     templates = QUESTION_TEMPLATES.get(skill, [])
     if not templates:
         return []
@@ -130,23 +134,32 @@ def _get_questions_for_skill(skill: str, seniority: str) -> list[dict[str, str]]
 
 
 def _dedupe_preserve_order(items: list[str]) -> list[str]:
+    """
+    Normalizes skill names while preserving first-seen order.
+    """
     result: list[str] = []
     seen: set[str] = set()
     for item in items or []:
-        normalized = item.lower().strip()
+        normalized = normalize_skill_name(item)
         if not normalized or normalized in seen:
             continue
         seen.add(normalized)
-        result.append(item)
+        result.append(normalized)
     return result
 
 
 def _stable_question_id(candidate_id: str, job_id: str, skill: str, question: str) -> str:
+    """
+    Builds a deterministic question ID from candidate, job, skill, and text.
+    """
     key = f"{candidate_id}:{job_id}:{skill.lower().strip()}:{question}"
     return str(uuid.uuid5(uuid.NAMESPACE_URL, key))
 
 
 def _candidate_evidence_for_skill(candidate: Candidate, skill: str) -> str | None:
+    """
+    Finds CV evidence that supports asking about a specific skill.
+    """
     skill_lower = skill.lower().strip()
     for detail in candidate.skills_detailed or []:
         if not isinstance(detail, dict):
@@ -154,7 +167,7 @@ def _candidate_evidence_for_skill(candidate: Candidate, skill: str) -> str | Non
         name = str(detail.get("name", "")).lower().strip()
         context = str(detail.get("context", "")).strip()
         status = str(detail.get("status", "")).lower().strip()
-        if name == skill_lower and context and status != "no_experience":
+        if name == skill_lower and context and status in {"has_experience", "unknown"}:
             return context[:220]
 
     for line in list(candidate.experience or []) + list(candidate.projects or []) + list(candidate.education or []):
@@ -164,6 +177,9 @@ def _candidate_evidence_for_skill(candidate: Candidate, skill: str) -> str | Non
 
 
 def _evaluation_criteria_for_skill(skill: str, grounded: bool) -> list[str]:
+    """
+    Builds evaluation criteria for a skill question.
+    """
     criteria = [
         f"Accurate understanding of {skill}",
         "Practical example grounded in the candidate's own experience",
@@ -182,6 +198,9 @@ def _question_for_skill(
     difficulty: str,
     required: bool,
 ) -> QuestionItem:
+    """
+    Creates one grounded interview question for a job skill.
+    """
     evidence = _candidate_evidence_for_skill(candidate, skill)
     role = job.title or "this role"
     if evidence:
@@ -217,6 +236,9 @@ def _question_for_skill(
 
 
 def build_grounded_question_items(candidate: Candidate, job: Job, limit: int = 8) -> list[QuestionItem]:
+    """
+    Builds interview questions from job requirements and candidate evidence.
+    """
     seniority = (job.seniority or "mid").lower()
     required_skills = _dedupe_preserve_order(job.required_skills or [])
     optional_skills = [
@@ -260,6 +282,9 @@ async def generate_interview_questions(
     candidate_id: str,
     job_id: str,
 ) -> tuple[list[QuestionItem], Candidate, Job]:
+    """
+    Loads candidate and job records and generates interview questions.
+    """
     cand_stmt = select(Candidate).where(Candidate.id == candidate_id)
     cand_result = await session.execute(cand_stmt)
     candidate = cand_result.scalar_one_or_none()
@@ -278,6 +303,9 @@ async def generate_interview_questions(
 
 
 def _evaluate_single_answer(question: str, answer: str, skill: str) -> tuple[float, str]:
+    """
+    Scores one answer with a lightweight rule-based heuristic.
+    """
     if not answer or len(answer.strip()) < 10:
         return 0.1, FEEDBACK_TEMPLATES["weak"].format(skill=skill)
 
@@ -321,6 +349,9 @@ async def create_interview_session(
     job_id: str,
     candidate_id: str,
 ) -> tuple[InterviewSessionModel, str | None, str | None]:
+    """
+    Creates and stores a new interview session.
+    """
     questions, candidate, job = await generate_interview_questions(session, candidate_id, job_id)
 
     interview = InterviewSessionModel(
@@ -344,6 +375,9 @@ async def submit_answer(
     question_id: str,
     answer: str,
 ) -> AnswerResponse:
+    """
+    Saves one answer, evaluates it, and advances interview status.
+    """
     stmt = select(InterviewSessionModel).where(InterviewSessionModel.id == session_id)
     result = await session.execute(stmt)
     interview = result.scalar_one_or_none()
@@ -391,6 +425,9 @@ async def evaluate_interview(
     session: AsyncSession,
     session_id: str,
 ) -> dict[str, Any]:
+    """
+    Aggregates saved answer evaluations into an interview summary.
+    """
     stmt = select(InterviewSessionModel).where(InterviewSessionModel.id == session_id)
     result = await session.execute(stmt)
     interview = result.scalar_one_or_none()

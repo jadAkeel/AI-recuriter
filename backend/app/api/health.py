@@ -13,11 +13,17 @@ router = APIRouter()
 
 @router.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
+    """
+    Returns the basic API health status.
+    """
     return HealthResponse(status="ok")
 
 
 @router.get("/ready", response_model=HealthResponse)
 async def readiness() -> HealthResponse:
+    """
+    Checks database readiness for the API.
+    """
     ok = await check_db_connection()
     status = "ok" if ok else "degraded"
     return HealthResponse(status=status)

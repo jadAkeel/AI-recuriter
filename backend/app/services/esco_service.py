@@ -70,6 +70,9 @@ class RelatedSkill:
     similarity_score: float
 
     def to_dict(self) -> dict[str, Any]:
+        """
+        Serializes this object into a plain dictionary.
+        """
         return {
             "skill": self.skill.to_dict(),
             "relationship": self.relationship,

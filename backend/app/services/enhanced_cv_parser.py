@@ -21,7 +21,15 @@ from app.schemas.candidate import (
 )
 from app.services.bilingual_llm import get_bilingual_llm_service
 from app.services.esco_service import ESCOSkillService, get_esco_service, NormalizedSkill
-from app.services.skill_catalog import SKILL_KEYWORDS, skill_in_text
+from app.services.skill_catalog import (
+    SKILL_KEYWORDS,
+    build_skill_pattern,
+    canonicalize_skill_name,
+    normalize_text_for_skill_matching,
+    skill_in_text,
+    validate_catalog_skill_list,
+)
+from app.services.stanza_nlp import ParsedText, parse_text_with_stanza
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +68,6 @@ EMAIL_PATTERN = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 PHONE_PATTERN = re.compile(r"(\+?\d[\d\s\-().]{8,}\d)")
 LOCATION_PATTERN = re.compile(r"^(?:location|address)\s*[:\-]\s*(.+)$", re.IGNORECASE | re.MULTILINE)
 LANGUAGE_WORDS = {
-    "arabic",
     "english",
     "french",
     "spanish",
@@ -84,9 +91,7 @@ NEGATION_INDICATORS = [
     "don't have",
     "do not have",
     "no knowledge",
-    "learning",
     "currently learning",
-    "studying",
     "want to learn",
     "wish to learn",
 ]
@@ -94,22 +99,42 @@ NEGATION_INDICATORS = [
 
 class EnhancedCVParser:
     def __init__(self, use_llm: bool = True, use_esco: bool = True) -> None:
+        """
+        Initializes the enhanced CV parser with optional LLM and ESCO support.
+        """
         self.use_llm = use_llm
         self.use_esco = use_esco
         self._llm_service = None
         self._esco_service: ESCOSkillService | None = None
 
     def _get_llm_service(self) -> Any:
+        """
+        Lazily creates the LLM service used for CV skill analysis.
+        """
         if self._llm_service is None and self.use_llm:
             self._llm_service = get_bilingual_llm_service()
         return self._llm_service
     
     def _get_esco_service(self) -> ESCOSkillService:
+        """
+        Lazily creates the ESCO skill service used for normalization.
+        """
         if self._esco_service is None and self.use_esco:
             self._esco_service = get_esco_service()
         return self._esco_service
 
     def extract_text(self, file_name: str, content: bytes) -> str:
+        """
+        Extracts CV text through the shared parser.
+        """
+        from app.services.cv_parser import extract_text as extract_cv_text
+
+        return extract_cv_text(file_name, content)
+
+    def _extract_text_without_ocr(self, file_name: str, content: bytes) -> str:
+        """
+        Extracts CV text without using OCR fallback.
+        """
         extension = Path(file_name).suffix.lower()
         if extension == ".pdf":
             return self._ensure_parseable_text(self._extract_pdf_text(content))
@@ -122,6 +147,9 @@ class EnhancedCVParser:
         raise ValueError(f"Unsupported file type: {extension}")
 
     def _extract_pdf_text(self, content: bytes) -> str:
+        """
+        Extracts text from a PDF text layer.
+        """
         try:
             with pdfplumber.open(io.BytesIO(content)) as pdf:
                 pages = [page.extract_text() or "" for page in pdf.pages]
@@ -130,6 +158,9 @@ class EnhancedCVParser:
             raise ValueError("Could not safely extract text from PDF") from exc
 
     def _extract_docx_text(self, content: bytes) -> str:
+        """
+        Extracts paragraph text from a DOCX file.
+        """
         try:
             document = Document(io.BytesIO(content))
             return "\n".join(paragraph.text for paragraph in document.paragraphs)
@@ -137,23 +168,24 @@ class EnhancedCVParser:
             raise ValueError("Could not safely extract text from DOCX") from exc
 
     def _ensure_parseable_text(self, text: str) -> str:
+        """
+        Rejects empty or very short CV text before enhanced parsing.
+        """
         cleaned = str(text or "").strip()
         if sum(1 for char in cleaned if char.isalnum()) < 10:
             raise ValueError("CV text is empty or too short to parse reliably")
         return cleaned
 
-    ARABIC_NORMALIZE_MAP = str.maketrans({
-        "إ": "ا", "أ": "ا", "آ": "ا", "ى": "ي", "ة": "ه", "ؤ": "و", "ئ": "ي",
-    })
-
     def _normalize_text(self, text: str) -> str:
-        lowered = text.lower()
-        lowered = lowered.replace("/", " ")
-        lowered = re.sub(r"[^a-z0-9+#.\s\u0600-\u06FF]", " ", lowered)
-        lowered = lowered.translate(self.ARABIC_NORMALIZE_MAP)
-        return re.sub(r"\s+", " ", lowered).strip()
+        """
+        Normalizes text for skill and evidence matching.
+        """
+        return normalize_text_for_skill_matching(text)
 
     def _extract_name(self, text: str) -> str | None:
+        """
+        Finds a likely candidate name while avoiding contact fields.
+        """
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         if not lines:
             return None
@@ -172,20 +204,32 @@ class EnhancedCVParser:
         return None
 
     def _extract_email(self, text: str) -> str | None:
+        """
+        Extracts the first email address found in the CV.
+        """
         match = EMAIL_PATTERN.search(text)
         return match.group(0) if match else None
 
     def _extract_phone(self, text: str) -> str | None:
+        """
+        Extracts the first phone number found in the CV.
+        """
         match = PHONE_PATTERN.search(text)
         return match.group(0) if match else None
 
     def _extract_location(self, text: str) -> str | None:
+        """
+        Extracts a location or address field from the CV.
+        """
         match = LOCATION_PATTERN.search(text)
         if match:
             return match.group(1).strip()[:120]
         return None
 
     def _extract_languages(self, text: str, sections: dict[str, list[str]]) -> list[str]:
+        """
+        Extracts known language names from CV text or the languages section.
+        """
         candidates: set[str] = set()
         language_text = " ".join(sections.get("languages", []))
         searchable = self._normalize_text(language_text or text)
@@ -195,6 +239,9 @@ class EnhancedCVParser:
         return sorted(candidates)
 
     def _extract_sections(self, text: str) -> dict[str, list[str]]:
+        """
+        Collects CV lines under known section headers.
+        """
         lines = [line.strip() for line in text.splitlines()]
         sections: dict[str, list[str]] = {
             "experience": [],
@@ -221,12 +268,29 @@ class EnhancedCVParser:
         return sections
 
     def _match_header(self, line: str) -> str | None:
+        """
+        Matches one CV line to a known section header.
+        """
         for section, pattern in SECTION_HEADERS.items():
+            if section == "skills" and re.match(r"^technologies\s*:\s*\S", line, re.IGNORECASE):
+                continue
             if pattern.search(line):
                 return section
         return None
 
-    def _extract_skills_rule_based(self, normalized_text: str, original_text: str) -> tuple[list[SkillDetail], list[str], list[str]]:
+    def _parse_text_for_nlp(self, text: str) -> ParsedText:
+        # Stanza is the NLP sentence/token parser; regex fallback stays inside the helper.
+        """
+        Runs the Stanza-backed NLP parser with fallback behavior.
+        """
+        return parse_text_with_stanza(text)
+
+    def _extract_skills_rule_based(
+        self,
+        normalized_text: str,
+        original_text: str,
+        parsed_text: ParsedText | None = None,
+    ) -> tuple[list[SkillDetail], list[str], list[str]]:
         """
         Extract skills from CV text using rule-based matching with ESCO normalization.
         
@@ -239,7 +303,7 @@ class EnhancedCVParser:
         learning_skills: list[str] = []
         
         esco = self._get_esco_service() if self.use_esco else None
-        sentences = re.split(r"[.!?\n]", original_text)
+        sentences = self._sentence_candidates(original_text, parsed_text)
 
         for skill in SKILL_KEYWORDS:
             if not skill_in_text(skill, normalized_text):
@@ -270,8 +334,11 @@ class EnhancedCVParser:
             best_context: str | None = None
 
             for sentence in sentences:
-                sentence_lower = sentence.lower()
-                if skill.lower() not in sentence_lower:
+                sentence_lower = self._normalize_text(sentence)
+                skill_match = build_skill_pattern(skill).search(sentence_lower)
+                if not skill_match and not (
+                    " " in skill and fuzz.partial_ratio(skill.lower(), sentence_lower) >= 90
+                ):
                     continue
 
                 sent_context = sentence.strip()
@@ -284,9 +351,9 @@ class EnhancedCVParser:
                 for neg in NEGATION_INDICATORS:
                     if neg in sentence_lower:
                         neg_index = sentence_lower.find(neg)
-                        skill_index = sentence_lower.find(skill.lower())
+                        skill_index = skill_match.start() if skill_match else sentence_lower.find(skill.lower())
                         if abs(neg_index - skill_index) < 100:
-                            if "learning" in neg or "studying" in neg:
+                            if "learn" in neg or "learning" in neg or "studying" in neg:
                                 sent_status = SkillStatus.LEARNING
                             else:
                                 sent_status = SkillStatus.NO_EXPERIENCE
@@ -352,18 +419,48 @@ class EnhancedCVParser:
 
         return skills_found, negative_skills, learning_skills
 
-    async def _extract_skills_with_llm(self, text: str) -> tuple[list[SkillDetail], list[str], list[str]]:
+    @staticmethod
+    def _sentence_candidates(text: str, parsed_text: ParsedText | None = None) -> list[str]:
+        """
+        Builds unique sentence candidates from regex and Stanza parsing.
+        """
+        parsed_text = parsed_text or parse_text_with_stanza(text)
+        regex_sentences = [part.strip() for part in re.split(r"[.!?\n]", text) if part.strip()]
+        stanza_sentences = parsed_text.sentences if parsed_text.parser == "stanza" else []
+
+        sentences: list[str] = []
+        seen: set[str] = set()
+        for sentence in regex_sentences + stanza_sentences:
+            key = " ".join(sentence.lower().split())
+            if key and key not in seen:
+                seen.add(key)
+                sentences.append(sentence)
+        return sentences
+
+    async def _extract_skills_with_llm(
+        self,
+        text: str,
+        parsed_text: ParsedText | None = None,
+    ) -> tuple[list[SkillDetail], list[str], list[str]]:
+        """
+        Combines rule-based skills with grounded LLM skill analysis.
+        """
         llm_service = self._get_llm_service()
         if llm_service is None:
-            return self._extract_skills_rule_based(self._normalize_text(text), text)
+            return self._extract_skills_rule_based(self._normalize_text(text), text, parsed_text)
 
         try:
+            rule_based_skills, rule_based_negative, rule_based_learning = self._extract_skills_rule_based(
+                self._normalize_text(text),
+                text,
+                parsed_text,
+            )
             analysis = await llm_service.analyze_cv_skills(text)
             raw_skills = analysis.get("skills_with_context", [])
 
             if not raw_skills:
                 logger.warning("LLM returned no skills, falling back to rule-based")
-                return self._extract_skills_rule_based(self._normalize_text(text), text)
+                return rule_based_skills, rule_based_negative, rule_based_learning
 
             skills_found: list[SkillDetail] = []
             negative_skills = self._grounded_llm_list(analysis.get("negative_skills", []), text)
@@ -371,6 +468,15 @@ class EnhancedCVParser:
 
             for skill_data in raw_skills:
                 if not isinstance(skill_data, dict):
+                    continue
+                catalog_skill = canonicalize_skill_name(
+                    str(skill_data.get("skill") or skill_data.get("name") or "")
+                )
+                if not catalog_skill:
+                    logger.warning(
+                        "Discarded non-catalog LLM CV skill",
+                        extra={"skill": str(skill_data.get("skill", ""))[:80]},
+                    )
                     continue
                 if not self._llm_skill_is_grounded(skill_data, text):
                     logger.warning(
@@ -391,7 +497,7 @@ class EnhancedCVParser:
                 }
 
                 skill_detail = SkillDetail(
-                    name=skill_data.get("skill", ""),
+                    name=catalog_skill,
                     level=level_map.get(skill_data.get("level", "unknown"), SkillLevel.UNKNOWN),
                     years=skill_data.get("years"),
                     status=status_map.get(skill_data.get("status", "unknown"), SkillStatus.UNKNOWN),
@@ -402,16 +508,51 @@ class EnhancedCVParser:
 
             if not skills_found:
                 logger.warning("LLM returned no grounded skills, falling back to rule-based")
-                return self._extract_skills_rule_based(self._normalize_text(text), text)
+                return rule_based_skills, rule_based_negative, rule_based_learning
 
-            return skills_found, negative_skills, learning_skills
+            return (
+                self._merge_skill_details(skills_found, rule_based_skills),
+                validate_catalog_skill_list(negative_skills + rule_based_negative),
+                validate_catalog_skill_list(learning_skills + rule_based_learning),
+            )
 
         except Exception as e:
             logger.error("LLM skill extraction failed", extra={"error_type": type(e).__name__})
-            return self._extract_skills_rule_based(self._normalize_text(text), text)
+            return self._extract_skills_rule_based(self._normalize_text(text), text, parsed_text)
+
+    @staticmethod
+    def _merge_skill_details(
+        primary: list[SkillDetail],
+        fallback: list[SkillDetail],
+    ) -> list[SkillDetail]:
+        """
+        Merges LLM and rule-based skill details while keeping stronger evidence.
+        """
+        merged: dict[str, SkillDetail] = {}
+        for detail in primary + fallback:
+            normalized = canonicalize_skill_name(detail.name)
+            if not normalized:
+                continue
+            existing = merged.get(normalized)
+            if existing is None:
+                merged[normalized] = detail.model_copy(update={"name": normalized})
+                continue
+
+            priority = {
+                SkillStatus.HAS_EXPERIENCE: 3,
+                SkillStatus.UNKNOWN: 2,
+                SkillStatus.LEARNING: 1,
+                SkillStatus.NO_EXPERIENCE: 0,
+            }
+            if priority.get(detail.status, -1) > priority.get(existing.status, -1):
+                merged[normalized] = detail.model_copy(update={"name": normalized})
+        return list(merged.values())
 
     @staticmethod
     def _normalize_llm_list(items: list[Any]) -> list[str]:
+        """
+        Normalizes LLM skill list output into plain skill names.
+        """
         if not isinstance(items, list):
             return []
         normalized: list[str] = []
@@ -425,10 +566,13 @@ class EnhancedCVParser:
         return normalized
 
     def _grounded_llm_list(self, items: list[Any], text: str) -> list[str]:
+        """
+        Keeps only LLM-listed skills that are grounded in the CV text.
+        """
         normalized: list[str] = []
         seen: set[str] = set()
         for skill in self._normalize_llm_list(items):
-            skill_name = " ".join(skill.lower().strip().split())
+            skill_name = canonicalize_skill_name(skill)
             if not skill_name or skill_name in seen:
                 continue
             if self._skill_name_is_grounded(skill_name, text):
@@ -437,7 +581,10 @@ class EnhancedCVParser:
         return normalized[:100]
 
     def _llm_skill_is_grounded(self, skill_data: dict[str, Any], text: str) -> bool:
-        skill_name = str(skill_data.get("skill") or skill_data.get("name") or "").strip().lower()
+        """
+        Checks whether one LLM skill extraction has text evidence in the CV.
+        """
+        skill_name = canonicalize_skill_name(str(skill_data.get("skill") or skill_data.get("name") or ""))
         if not skill_name:
             return False
         if self._skill_name_is_grounded(skill_name, text):
@@ -447,18 +594,26 @@ class EnhancedCVParser:
             return False
         normalized_text = self._normalize_text(text)
         normalized_context = self._normalize_text(context)
-        return bool(normalized_context and normalized_context in normalized_text and skill_name in normalized_context)
+        return bool(
+            normalized_context
+            and normalized_context in normalized_text
+            and skill_in_text(skill_name, normalized_context)
+        )
 
     def _skill_name_is_grounded(self, skill_name: str, text: str) -> bool:
+        """
+        Checks whether a canonical skill appears in the CV text.
+        """
         normalized_text = self._normalize_text(text)
-        normalized_skill = " ".join(skill_name.lower().strip().split())
+        normalized_skill = canonicalize_skill_name(skill_name)
         if not normalized_skill:
             return False
-        if normalized_skill in SKILL_KEYWORDS:
-            return skill_in_text(normalized_skill, normalized_text)
-        return bool(re.search(r"\b" + re.escape(normalized_skill) + r"\b", normalized_text))
+        return skill_in_text(normalized_skill, normalized_text)
 
     def _parse_experience_entries(self, experience_lines: list[str]) -> list[ExperienceEntry]:
+        """
+        Converts experience section lines into structured experience entries.
+        """
         entries: list[ExperienceEntry] = []
         if not experience_lines:
             return entries
@@ -516,6 +671,9 @@ class EnhancedCVParser:
         return entries
 
     def _parse_education_entries(self, education_lines: list[str]) -> list[EducationEntry]:
+        """
+        Converts education section lines into structured education entries.
+        """
         entries: list[EducationEntry] = []
         if not education_lines:
             return entries
@@ -557,6 +715,9 @@ class EnhancedCVParser:
         return entries
 
     def _calculate_total_years(self, entries: list[ExperienceEntry]) -> float | None:
+        """
+        Estimates total experience years from parsed date ranges.
+        """
         total_years = 0.0
         has_calculable = False
 
@@ -583,6 +744,9 @@ class EnhancedCVParser:
         return total_years if has_calculable else None
 
     def _extract_highest_degree(self, entries: list[EducationEntry]) -> str | None:
+        """
+        Finds the highest degree mentioned in parsed education entries.
+        """
         degree_rank = {
             "phd": 7,
             "doctorate": 7,
@@ -620,6 +784,9 @@ class EnhancedCVParser:
         negative_skills: list[str],
         learning_skills: list[str],
     ) -> CandidateProfile:
+        """
+        Builds the final structured candidate profile from extracted CV signals.
+        """
         sections = self._extract_sections(text)
 
         full_name = self._extract_name(text)
@@ -677,20 +844,28 @@ class EnhancedCVParser:
         return profile
 
     async def parse_async(self, text: str) -> CandidateProfile:
+        """
+        Parses CV text asynchronously, using the LLM path when enabled.
+        """
         text = self._ensure_parseable_text(text)
         normalized = self._normalize_text(text)
+        parsed_text = self._parse_text_for_nlp(text)
         if self.use_llm and self._get_llm_service():
-            skills_detailed, negative_skills, learning_skills = await self._extract_skills_with_llm(text)
+            skills_detailed, negative_skills, learning_skills = await self._extract_skills_with_llm(text, parsed_text)
         else:
-            skills_detailed, negative_skills, learning_skills = self._extract_skills_rule_based(normalized, text)
+            skills_detailed, negative_skills, learning_skills = self._extract_skills_rule_based(normalized, text, parsed_text)
 
         return self._build_profile(text, skills_detailed, negative_skills, learning_skills)
 
     def parse(self, text: str) -> CandidateProfile:
+        """
+        Parses CV text synchronously when no event loop is already running.
+        """
         text = self._ensure_parseable_text(text)
         normalized = self._normalize_text(text)
+        parsed_text = self._parse_text_for_nlp(text)
         if not self.use_llm:
-            skills_detailed, negative_skills, learning_skills = self._extract_skills_rule_based(normalized, text)
+            skills_detailed, negative_skills, learning_skills = self._extract_skills_rule_based(normalized, text, parsed_text)
             return self._build_profile(text, skills_detailed, negative_skills, learning_skills)
 
         try:
@@ -702,8 +877,14 @@ class EnhancedCVParser:
 
 
 def get_enhanced_cv_parser() -> EnhancedCVParser:
+    """
+    Creates an enhanced parser with LLM support enabled.
+    """
     return EnhancedCVParser(use_llm=True)
 
 
 def get_simple_cv_parser() -> EnhancedCVParser:
+    """
+    Creates an enhanced parser with LLM support disabled.
+    """
     return EnhancedCVParser(use_llm=False)

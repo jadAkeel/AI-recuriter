@@ -47,12 +47,18 @@ CS_KEYWORDS = {
 
 
 def sanitize_filename(name: str) -> str:
+    """
+    Converts text into a safe filename.
+    """
     clean = re.sub(r'[<>:"/\\|?*]', '_', name)
     clean = re.sub(r'\s+', '_', clean)
     return clean.strip('_')[:80]
 
 
 def extract_name(text: str) -> str | None:
+    """
+    Extracts a likely name from resume text.
+    """
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if not lines:
         return None
@@ -75,6 +81,9 @@ def extract_name(text: str) -> str | None:
 
 
 def has_cs_skills(text: str) -> bool:
+    """
+    Checks whether resume text contains computer science skills.
+    """
     text_lower = text.lower()
     count = 0
     for keyword in CS_KEYWORDS:
@@ -86,6 +95,9 @@ def has_cs_skills(text: str) -> bool:
 
 
 def text_to_pdf(text: str, output_path: Path) -> None:
+    """
+    Writes plain resume text into a simple PDF file.
+    """
     doc = SimpleDocTemplate(str(output_path), pagesize=letter)
     styles = getSampleStyleSheet()
 
@@ -110,6 +122,9 @@ def text_to_pdf(text: str, output_path: Path) -> None:
 
 
 def main() -> None:
+    """
+    Runs this script from the command line.
+    """
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     existing = list(OUTPUT_DIR.glob("*.pdf"))

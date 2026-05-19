@@ -24,12 +24,18 @@ depends_on = None
 
 
 def _embedding_vector_column(bind) -> sa.Column:
+    """
+    Builds the embeddings vector column with pgvector support when available.
+    """
     if bind.dialect.name == "postgresql" and Vector is not None:
         return sa.Column("embedding_vector", Vector(settings.embedding_dimension), nullable=True)
     return sa.Column("embedding_vector", sa.JSON(), nullable=True)
 
 
 def upgrade() -> None:
+    """
+    Applies this database migration.
+    """
     bind = op.get_bind()
     if bind.dialect.name == "postgresql":
         op.execute("CREATE EXTENSION IF NOT EXISTS vector")
@@ -150,6 +156,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """
+    Reverts this database migration.
+    """
     op.drop_table("reports")
     op.drop_table("match_results")
     op.drop_table("knowledge_documents")

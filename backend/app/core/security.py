@@ -11,8 +11,12 @@ from starlette.responses import JSONResponse
 from app.core.config import settings
 
 
+# Adds security headers to every response
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        """
+        Applies middleware logic before returning the response.
+        """
         response = await call_next(request)
         if not settings.security_headers_enabled:
             return response
@@ -35,12 +39,18 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     """
 
     def __init__(self, app, requests: int, window_seconds: int) -> None:
+        """
+        Initializes the in-process rate limiter settings and hit storage.
+        """
         super().__init__(app)
         self.requests = max(1, requests)
         self.window_seconds = max(1, window_seconds)
         self._hits: defaultdict[str, deque[float]] = defaultdict(deque)
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        """
+        Applies middleware logic before returning the response.
+        """
         if request.url.path.endswith(("/health", "/ready")):
             return await call_next(request)
 
@@ -63,6 +73,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
 
 def _client_ip(request: Request) -> str:
+    """
+    Finds the client IP address from forwarded headers or request metadata.
+    """
     forwarded_for = request.headers.get("x-forwarded-for")
     if forwarded_for:
         return forwarded_for.split(",", 1)[0].strip()

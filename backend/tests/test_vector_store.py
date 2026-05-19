@@ -10,6 +10,9 @@ from app.services.vector_store import VectorStore
 
 @pytest.mark.asyncio
 async def test_vector_store_upsert_and_query() -> None:
+    """
+    Checks that vector store upsert and query.
+    """
     await init_db()
     embedder = HashEmbeddingService()
     entity_type = f"candidate-test-{uuid.uuid4().hex}"
@@ -30,6 +33,9 @@ async def test_vector_store_upsert_and_query() -> None:
 
 
 def test_vector_store_rejects_wrong_postgres_dimension() -> None:
+    """
+    Checks that vector store rejects wrong postgres dimension.
+    """
     store = VectorStore.__new__(VectorStore)
     store.is_postgres = True
 

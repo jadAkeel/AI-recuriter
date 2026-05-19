@@ -12,6 +12,9 @@ _LISTENER: Optional[logging.handlers.QueueListener] = None
 
 
 def configure_logging() -> None:
+    """
+    Configures application logging handlers and log levels.
+    """
     global _LOG_QUEUE, _LISTENER
 
     if _LOG_QUEUE is not None:
@@ -41,6 +44,9 @@ def configure_logging() -> None:
 
 
 def shutdown_logging() -> None:
+    """
+    Stops and closes application logging handlers.
+    """
     global _LOG_QUEUE, _LISTENER
 
     if _LISTENER:

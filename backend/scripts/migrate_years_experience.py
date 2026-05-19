@@ -20,6 +20,9 @@ YEAR_PATTERN = re.compile(r"\b(20\d{2})\b")
 
 
 def _estimate_years(experience_entries: list[str]) -> float | None:
+    """
+    Estimates years of experience from stored experience text.
+    """
     years: set[int] = set()
     for entry in experience_entries:
         found = YEAR_PATTERN.findall(entry)
@@ -31,6 +34,9 @@ def _estimate_years(experience_entries: list[str]) -> float | None:
 
 
 async def migrate() -> None:
+    """
+    Backfills total years of experience for existing candidates.
+    """
     await init_db()
     async with SessionLocal() as session:
         result = await session.execute(select(Candidate))

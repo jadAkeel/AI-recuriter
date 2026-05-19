@@ -25,6 +25,9 @@ _db.reset_engine()
 
 def pytest_sessionstart(session):
     # Best-effort cleanup so stale schema doesn't leak across runs.
+    """
+    Supports the surrounding test for pytest sessionstart.
+    """
     try:
         TEST_DB_PATH.unlink(missing_ok=True)
     except Exception:
@@ -32,6 +35,9 @@ def pytest_sessionstart(session):
 
 
 def pytest_sessionfinish(session, exitstatus):
+    """
+    Supports the surrounding test for pytest sessionfinish.
+    """
     try:
         TEST_DB_PATH.unlink(missing_ok=True)
     except Exception:

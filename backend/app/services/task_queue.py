@@ -27,6 +27,9 @@ async def enqueue_cv_processing(
     file_path: str | None = None,
     task_id: str | None = None,
 ) -> str:
+    """
+    Queues a CV processing task and returns its task ID.
+    """
     task_id = task_id or str(uuid.uuid4())
     task = {
         "task_id": task_id,
@@ -46,6 +49,9 @@ async def enqueue_cv_processing(
 
 
 async def get_task_result(task_id: str) -> dict[str, Any] | None:
+    """
+    Returns the stored result for a queued CV task.
+    """
     r = await get_redis()
     if r:
         result = await r.get(f"{TASK_RESULT_PREFIX}{task_id}")
@@ -54,10 +60,16 @@ async def get_task_result(task_id: str) -> dict[str, Any] | None:
 
 
 async def run_cv_worker(process_func: ProcessFunc) -> None:
+    """
+    Continuously processes queued CV tasks with the provided handler.
+    """
     r = await get_redis()
     if r is None:
         logger.warning("Redis not available, CV worker starting with in-memory queue only")
         async def _process_in_memory():
+            """
+            Processes queued CV tasks from the in-memory fallback store.
+            """
             while True:
                 task_keys = list(_in_memory_tasks.keys())
                 for task_id in task_keys:

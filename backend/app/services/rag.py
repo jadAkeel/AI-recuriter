@@ -48,6 +48,9 @@ INITIAL_KNOWLEDGE: list[dict[str, Any]] = [
 
 
 async def _generate_and_store_embedding(document: KnowledgeDocument) -> None:
+    """
+    Generates an embedding for a knowledge document when possible.
+    """
     try:
         embedder = get_embedding_service()
         emb = (await embedder.embed([document.content]))[0]
@@ -57,6 +60,9 @@ async def _generate_and_store_embedding(document: KnowledgeDocument) -> None:
 
 
 async def ingest_knowledge_base(session: AsyncSession) -> int:
+    """
+    Seeds the database with built-in knowledge documents.
+    """
     count = 0
     for doc in INITIAL_KNOWLEDGE:
         stmt = select(KnowledgeDocument).where(
@@ -86,6 +92,9 @@ async def add_document(
     category: str,
     tags: list[str],
 ) -> IngestResponse:
+    """
+    Adds one knowledge document and its embedding to the database.
+    """
     document = KnowledgeDocument(
         id=str(uuid.uuid4()),
         title=title,
@@ -105,6 +114,9 @@ async def query_knowledge(
     category: str | None = None,
     top_k: int = 5,
 ) -> QueryResponse:
+    """
+    Ranks knowledge documents by embedding similarity to a query.
+    """
     stmt = select(KnowledgeDocument)
     if category:
         stmt = stmt.where(KnowledgeDocument.category == category)

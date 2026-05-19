@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ScoreBreakdown(BaseModel):
@@ -8,6 +8,15 @@ class ScoreBreakdown(BaseModel):
     required_skills_score: float
     optional_skills_score: float
     overall_score: float
+    scoring_model: str | None = None
+    scoring_formula: str | None = None
+    score_weights: dict[str, float] = Field(default_factory=dict)
+    score_contributions: dict[str, float] = Field(default_factory=dict)
+    score_penalties: dict[str, float] = Field(default_factory=dict)
+    pre_cap_score: float | None = None
+    score_cap: float | None = None
+    score_cap_reason: str | None = None
+    score_trace: dict = Field(default_factory=dict)
 
 
 class SkillGapItem(BaseModel):

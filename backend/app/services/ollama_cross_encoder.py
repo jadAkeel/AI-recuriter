@@ -22,6 +22,9 @@ class OllamaCrossEncoder:
     MAX_TEXT_LENGTH = 2000
 
     def __init__(self, max_concurrent: int = 2, timeout: int | None = None) -> None:
+        """
+        Initializes the Ollama cross-encoder client and concurrency limits.
+        """
         self.base_url = settings.ollama_base_url
         self.model_name = settings.ollama_model
         self.timeout = timeout or int(settings.ai_request_timeout_seconds)
@@ -30,6 +33,9 @@ class OllamaCrossEncoder:
 
     @property
     async def client(self) -> httpx.AsyncClient:
+        """
+        Creates or returns the reusable async HTTP client.
+        """
         if self._http_client is None:
             self._http_client = httpx.AsyncClient(
                 base_url=self.base_url,
@@ -38,6 +44,9 @@ class OllamaCrossEncoder:
         return self._http_client
 
     async def close(self) -> None:
+        """
+        Closes the reusable HTTP client.
+        """
         if self._http_client:
             await self._http_client.aclose()
             self._http_client = None
@@ -45,8 +54,7 @@ class OllamaCrossEncoder:
     async def predict(
         self,
         pairs: list[tuple[str, str]],
-        fallback_score: float = 0.5,
-    ) -> list[float]:
+    ) -> list[float | None]:
         """
         Predict relevance scores for job-candidate pairs.
 
@@ -57,7 +65,10 @@ class OllamaCrossEncoder:
 
         sem = self._semaphore
 
-        async def _score_single(job_desc: str, candidate_text: str) -> float:
+        async def _score_single(job_desc: str, candidate_text: str) -> float | None:
+            """
+            Scores one job-candidate text pair through Ollama.
+            """
             truncated_job = job_desc[:self.MAX_TEXT_LENGTH] if job_desc else ""
             truncated_candidate = candidate_text[:self.MAX_TEXT_LENGTH] if candidate_text else ""
 
@@ -77,7 +88,7 @@ class OllamaCrossEncoder:
             payload = {
                 "model": self.model_name,
                 "prompt": prompt,
-                "options": {"temperature": 0.1, "num_predict": 200},
+                "options": {"temperature": 0.0, "num_predict": 200},
                 "format": "json",
                 "stream": False,
             }
@@ -97,12 +108,15 @@ class OllamaCrossEncoder:
                             await asyncio.sleep(min(2.0, 0.25 * (2 ** attempt)))
                 except Exception as e:
                     logger.warning("Cross-encoder scoring failed", extra={"error_type": type(e).__name__})
-                    return fallback_score
+                    return None
 
         tasks = [_score_single(job_desc, cand_text) for job_desc, cand_text in pairs]
         return await asyncio.gather(*tasks)
 
     def _parse_score(self, result_text: str) -> float:
+        """
+        Parses a bounded numeric score from model output.
+        """
         try:
             json_start = result_text.find("{")
             json_end = result_text.rfind("}") + 1
@@ -129,6 +143,9 @@ _cross_encoder_instance: OllamaCrossEncoder | None = None
 
 
 def get_ollama_cross_encoder() -> OllamaCrossEncoder:
+    """
+    Creates or returns the cached Ollama cross-encoder.
+    """
     global _cross_encoder_instance
     if _cross_encoder_instance is None:
         _cross_encoder_instance = OllamaCrossEncoder()

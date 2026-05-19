@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import settings
-from app.services.enhanced_interview import get_enhanced_interview_service
+from app.services.enhanced_interview import get_simple_interview_service
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +22,9 @@ _WHISPER_MODEL: Any | None = None
 
 
 def _cleanup_temp_files() -> None:
+    """
+    Removes expired temporary audio files.
+    """
     temp_dir = Path(settings.voice_temp_dir)
     if not temp_dir.exists():
         return
@@ -36,11 +39,17 @@ def _cleanup_temp_files() -> None:
 
 class VoiceService:
     def __init__(self) -> None:
+        """
+        Initializes voice storage and the simple interview evaluator.
+        """
         self.temp_dir = Path(settings.voice_temp_dir)
         self.temp_dir.mkdir(parents=True, exist_ok=True)
-        self._interview_service = get_enhanced_interview_service()
+        self._interview_service = get_simple_interview_service()
 
     async def start_session(self, session_id: str) -> dict[str, Any]:
+        """
+        Creates in-memory state for a voice interview session.
+        """
         _voice_sessions[session_id] = {
             "status": "active",
             "current_question_idx": 0,
@@ -58,15 +67,18 @@ class VoiceService:
         skill: str | None = None,
         difficulty: str = "mid",
     ) -> dict[str, Any]:
+        """
+        Transcribes audio, evaluates the answer, and optionally returns spoken feedback.
+        """
         transcript = await self._speech_to_text(audio_data)
 
         if not transcript.strip():
             return {
                 "transcript": "",
                 "score": 0.0,
-                "feedback": "لم يتم التعرف على أي كلام. يرجى المحاولة مرة أخرى.",
+                "feedback": "No speech detected. Please try again.",
                 "audio": None,
-                "language_detected": "arabic",
+                "language_detected": "english",
             }
 
         evaluation = await self._interview_service.evaluate_answer_with_llm(
@@ -90,23 +102,31 @@ class VoiceService:
         }
 
     async def transcribe_audio(self, audio_data: bytes) -> str:
+        """
+        Transcribes raw audio bytes into text.
+        """
         return await self._speech_to_text(audio_data)
 
     def _build_tts_feedback(self, evaluation: dict[str, Any], transcript: str) -> str:
+        """
+        Builds the short spoken feedback text from an evaluation.
+        """
         score = evaluation["score"]
         feedback = evaluation["feedback"]
-        is_arabic = evaluation.get("language_detected", "english") == "arabic"
 
         if score >= 0.7:
-            prefix = "أحسنت! " if is_arabic else "Great! "
+            prefix = "Great! "
         elif score >= 0.4:
-            prefix = "جيد. " if is_arabic else "Good. "
+            prefix = "Good. "
         else:
-            prefix = "حاول مرة أخرى. " if is_arabic else "Keep trying. "
+            prefix = "Keep trying. "
 
         return f"{prefix}{feedback}"
 
     async def get_session_status(self, session_id: str) -> dict[str, Any]:
+        """
+        Returns in-memory status for a voice session.
+        """
         session = _voice_sessions.get(session_id)
         if session is None:
             return {"session_id": session_id, "status": "not_found"}
@@ -118,23 +138,34 @@ class VoiceService:
         }
 
     async def _speech_to_text(self, audio_data: bytes) -> str:
+        """
+        Runs speech-to-text with OpenAI first and local fallback second.
+        """
+        timeout = settings.voice_request_timeout_seconds
         if settings.openai_api_key:
             try:
-                return await self._stt_openai(audio_data)
+                return await asyncio.wait_for(self._stt_openai(audio_data), timeout=timeout)
+            except asyncio.TimeoutError:
+                logger.warning("OpenAI STT timed out, trying fallback")
             except Exception as e:
                 logger.warning(f"OpenAI STT failed, trying fallback: {e}")
 
         try:
-            return await self._stt_faster_whisper(audio_data)
+            return await asyncio.wait_for(self._stt_faster_whisper(audio_data), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning("faster-whisper STT timed out")
         except Exception as e:
             logger.warning(f"faster-whisper failed: {e}")
 
         return ""
 
     async def _stt_openai(self, audio_data: bytes) -> str:
+        """
+        Transcribes audio with OpenAI speech-to-text.
+        """
         from openai import AsyncOpenAI
 
-        client = AsyncOpenAI(api_key=settings.openai_api_key)
+        client = AsyncOpenAI(api_key=settings.openai_api_key, timeout=settings.voice_request_timeout_seconds)
         tmp_path = self._save_temp_audio(audio_data, suffix=".webm")
 
         try:
@@ -142,7 +173,6 @@ class VoiceService:
                 transcript = await client.audio.transcriptions.create(
                     model=settings.voice_stt_model,
                     file=f,
-                    language="ar",
                     response_format="text",
                 )
             return transcript or ""
@@ -150,41 +180,58 @@ class VoiceService:
             self._remove_temp_file(tmp_path)
 
     async def _stt_faster_whisper(self, audio_data: bytes) -> str:
+        """
+        Runs faster-whisper transcription in a worker thread.
+        """
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._stt_faster_whisper_sync, audio_data)
 
     def _stt_faster_whisper_sync(self, audio_data: bytes) -> str:
+        """
+        Performs synchronous faster-whisper transcription from a temp file.
+        """
         global _WHISPER_MODEL
         from faster_whisper import WhisperModel
 
         if _WHISPER_MODEL is None:
             _WHISPER_MODEL = WhisperModel("base", device="cpu", compute_type="int8")
-        tmp_path = self._save_temp_audio(audio_data, suffix=".wav")
+        tmp_path = self._save_temp_audio(audio_data, suffix=".webm")
 
         try:
-            segments, _ = _WHISPER_MODEL.transcribe(tmp_path, language="ar")
+            segments, _ = _WHISPER_MODEL.transcribe(tmp_path)
             return " ".join(seg.text for seg in segments)
         finally:
             self._remove_temp_file(tmp_path)
 
     async def _text_to_speech(self, text: str) -> bytes | None:
+        """
+        Converts text feedback into audio with provider fallback.
+        """
+        timeout = settings.voice_request_timeout_seconds
         if settings.openai_api_key:
             try:
-                return await self._tts_openai(text)
+                return await asyncio.wait_for(self._tts_openai(text), timeout=timeout)
+            except asyncio.TimeoutError:
+                logger.warning("OpenAI TTS timed out, trying fallback")
             except Exception as e:
                 logger.warning(f"OpenAI TTS failed, trying fallback: {e}")
 
         try:
-            return await self._tts_edge(text)
+            return await asyncio.wait_for(self._tts_edge(text), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning("Edge TTS timed out")
         except Exception as e:
             logger.warning(f"Edge TTS failed: {e}")
 
         return None
 
     async def _tts_openai(self, text: str) -> bytes:
+        """
+        Generates speech audio with OpenAI TTS.
+        """
         from openai import AsyncOpenAI
 
-        client = AsyncOpenAI(api_key=settings.openai_api_key)
+        client = AsyncOpenAI(api_key=settings.openai_api_key, timeout=settings.voice_request_timeout_seconds)
         response = await client.audio.speech.create(
             model=settings.voice_tts_model,
             voice=settings.voice_tts_voice,
@@ -193,10 +240,12 @@ class VoiceService:
         return response.content
 
     async def _tts_edge(self, text: str) -> bytes:
+        """
+        Generates speech audio with Edge TTS.
+        """
         import edge_tts
 
-        has_arabic = any("\u0600" <= c <= "\u06FF" for c in text)
-        voice = "ar-SA-ZariyahNeural" if has_arabic else "en-US-JennyNeural"
+        voice = "en-US-JennyNeural"
 
         communicate = edge_tts.Communicate(text, voice)
         audio_stream = io.BytesIO()
@@ -208,6 +257,9 @@ class VoiceService:
         return audio_stream.getvalue()
 
     def _save_temp_audio(self, data: bytes, suffix: str = ".webm") -> str:
+        """
+        Writes temporary audio bytes to disk.
+        """
         _cleanup_temp_files()
         name = f"{uuid.uuid4().hex}{suffix}"
         path = os.path.join(str(self.temp_dir), name)
@@ -216,6 +268,9 @@ class VoiceService:
         return path
 
     def _remove_temp_file(self, path: str) -> None:
+        """
+        Deletes a temporary audio file if it exists.
+        """
         try:
             if os.path.exists(path):
                 os.unlink(path)
@@ -224,4 +279,7 @@ class VoiceService:
 
 
 def get_voice_service() -> VoiceService:
+    """
+    Creates a voice service instance.
+    """
     return VoiceService()
