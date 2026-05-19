@@ -284,12 +284,18 @@ EXP_PROJECTS = [
 
 
 def sanitize_filename(name: str) -> str:
+    """
+    Converts text into a safe filename.
+    """
     clean = re.sub(r'[<>:"/\\|?*]', '_', name)
     clean = re.sub(r'\s+', '_', clean)
     return clean.strip('_')[:80]
 
 
 def pick_level() -> tuple[str, dict]:
+    """
+    Chooses an experience level for a generated resume.
+    """
     total_weight = sum(LEVELS[l]["weight"] for l in LEVELS)
     r = random.randint(1, total_weight)
     cumulative = 0
@@ -301,6 +307,9 @@ def pick_level() -> tuple[str, dict]:
 
 
 def pick_job_templates(exp_years: int, count: int) -> list[dict]:
+    """
+    Selects job templates that fit generated experience years.
+    """
     suitable = [j for j in JOB_TEMPLATES if j["min_years"] <= exp_years and j["max_years"] >= exp_years * 0.5]
     if len(suitable) < count:
         suitable = sorted(JOB_TEMPLATES, key=lambda j: abs((j["min_years"] + j["max_years"]) / 2 - exp_years))
@@ -310,6 +319,9 @@ def pick_job_templates(exp_years: int, count: int) -> list[dict]:
 
 
 def fill_template(text: str, tech: list[str], job_index: int = 0) -> str:
+    """
+    Fills a resume template with selected technologies.
+    """
     x_values = [random.randint(2, 9), random.randint(10, 99), random.randint(100, 999), random.randint(1000, 9999)]
     replacements = {
         "{tech}": random.choice(tech) if tech else "Python",
@@ -324,6 +336,9 @@ def fill_template(text: str, tech: list[str], job_index: int = 0) -> str:
 
 
 def generate_resume(index: int) -> dict:
+    """
+    Generates one synthetic computer science resume record.
+    """
     current_year = datetime.now().year
     first = random.choice(FIRST_NAMES)
     last = random.choice(LAST_NAMES)
@@ -402,6 +417,9 @@ def generate_resume(index: int) -> dict:
 
 
 def resume_to_text(resume: dict) -> str:
+    """
+    Formats a generated resume record as plain text.
+    """
     lines = []
     lines.append(f"{resume['full_name']}")
     lines.append(f"Email: {resume['email']}")
@@ -511,6 +529,9 @@ def resume_to_text(resume: dict) -> str:
 
 
 def text_to_pdf(text: str, output_path: Path) -> None:
+    """
+    Writes plain resume text into a simple PDF file.
+    """
     doc = SimpleDocTemplate(str(output_path), pagesize=letter)
     styles = getSampleStyleSheet()
     style = styles['BodyText']
@@ -535,6 +556,9 @@ def text_to_pdf(text: str, output_path: Path) -> None:
 
 
 def main() -> None:
+    """
+    Runs this script from the command line.
+    """
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     existing = list(OUTPUT_DIR.glob("*.pdf"))
     print(f"Output dir: {OUTPUT_DIR}")

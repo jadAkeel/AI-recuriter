@@ -10,17 +10,38 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.candidate import Candidate
 from app.models.job import Job
 from app.models.match_result import MatchResult
-from app.services.hybrid_matcher import HybridMatchingEngine, SENIORITY_YEARS
-from app.services.skill_catalog import SYNONYM_MAP
+from app.services.hybrid_matcher import (
+    CROSS_ENCODER_SCORING_FORMULA,
+    DEFAULT_WEIGHTS,
+    HybridMatchingEngine,
+    SENIORITY_YEARS,
+    clamp_score,
+    compute_cross_encoder_adjusted_score,
+    compute_explainable_score,
+    compute_seniority_score,
+    required_skill_score_cap_from_coverage,
+    required_skill_score_cap_reason_from_coverage,
+)
+from app.services.skill_catalog import SYNONYM_MAP, is_job_skill_name, normalize_skill_name
 from app.services.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
 
 # Keep legacy functions for backwards compatibility
 YEAR_PATTERN = re.compile(r"\b((?:19|20)\d{2})\b")
+LEGACY_QUICK_WEIGHTS = {
+    "skill_required": 0.70,
+    "skill_optional": 0.20,
+    "semantic": 0.0,
+    "experience": 0.05,
+    "seniority_match": 0.05,
+}
 
 
 def _estimate_years_experience(experience_entries: list[str]) -> float:
+    """
+    Estimates years of experience from date ranges in parsed CV entries.
+    """
     total = 0.0
     for entry in experience_entries:
         found = YEAR_PATTERN.findall(entry)
@@ -32,9 +53,12 @@ def _estimate_years_experience(experience_entries: list[str]) -> float:
 
 
 def _expand_skills_with_synonyms(skills: list[str]) -> set[str]:
+    """
+    Expands candidate skills with curated synonyms for legacy matching.
+    """
     expanded: set[str] = set()
     for skill in skills:
-        skill_lower = skill.lower().strip()
+        skill_lower = normalize_skill_name(skill)
         expanded.add(skill_lower)
         related = SYNONYM_MAP.get(skill_lower, set())
         expanded.update(related)
@@ -46,7 +70,10 @@ def _skill_matches_required(
     candidate_set: set[str],
     candidate_expanded: set[str],
 ) -> bool:
-    skill_lower = required_skill.lower().strip()
+    """
+    Checks whether a candidate skill set satisfies one required skill.
+    """
+    skill_lower = normalize_skill_name(required_skill)
     if skill_lower in candidate_set:
         return True
     related = SYNONYM_MAP.get(skill_lower, set())
@@ -60,12 +87,15 @@ def compute_skill_score(
     candidate_experience: list[str] | None = None,
     job_seniority: str | None = None,
 ) -> dict[str, Any]:
+    """
+    Calculates required and optional skill coverage for candidate-job matching.
+    """
     required_skills = _dedupe_skills(required_skills)
-    optional_skills = [s for s in _dedupe_skills(optional_skills) if s.lower().strip() not in {r.lower().strip() for r in required_skills}]
+    optional_skills = [s for s in _dedupe_skills(optional_skills) if normalize_skill_name(s) not in {normalize_skill_name(r) for r in required_skills}]
     candidate_skills = _dedupe_skills(candidate_skills)
-    required_set = {skill.lower().strip() for skill in required_skills}
-    optional_set = {skill.lower().strip() for skill in optional_skills}
-    candidate_set = {skill.lower().strip() for skill in candidate_skills}
+    required_set = {normalize_skill_name(skill) for skill in required_skills}
+    optional_set = {normalize_skill_name(skill) for skill in optional_skills}
+    candidate_set = {normalize_skill_name(skill) for skill in candidate_skills}
     candidate_expanded = _expand_skills_with_synonyms(candidate_skills)
 
     matched_required = sorted([
@@ -105,38 +135,31 @@ def compute_skill_score(
 
 
 def _dedupe_skills(skills: list[str]) -> list[str]:
+    """
+    Normalizes, filters, and de-duplicates job skill names.
+    """
     deduped: list[str] = []
     seen: set[str] = set()
     for skill in skills or []:
-        normalized = skill.lower().strip()
-        if normalized and normalized not in seen:
+        normalized = normalize_skill_name(skill)
+        if normalized and normalized not in seen and is_job_skill_name(normalized):
             seen.add(normalized)
-            deduped.append(skill)
+            deduped.append(normalized)
     return deduped
 
 
 def _required_score_cap(required_score: float, has_required_skills: bool) -> float:
-    if not has_required_skills:
-        return 1.0
-    if required_score <= 0.0:
-        return 0.40
-    if required_score < 0.5:
-        return 0.55
-    if required_score < 1.0:
-        return 0.75
-    return 1.0
+    """
+    Returns the score cap for a required-skill coverage value.
+    """
+    return required_skill_score_cap_from_coverage(required_score, has_required_skills)
 
 
 def _required_score_cap_reason(required_score: float, has_required_skills: bool) -> str:
-    if not has_required_skills:
-        return "No required skills were defined for this job."
-    if required_score <= 0.0:
-        return "No required skills matched, so the score is capped at 40%."
-    if required_score < 0.5:
-        return "Less than half of required skills matched, so the score is capped at 55%."
-    if required_score < 1.0:
-        return "Some required skills are missing, so the score is capped at 75%."
-    return "All required skills matched, so no required-skill cap was applied."
+    """
+    Explains the score cap for required-skill coverage.
+    """
+    return required_skill_score_cap_reason_from_coverage(required_score, has_required_skills)
 
 
 async def rank_candidates(
@@ -199,20 +222,35 @@ async def _rank_with_hybrid_engine(
     )
     
     results: list[MatchResult] = []
-    from sqlalchemy import delete as sa_delete
     sorted_hybrid_results = sorted(hybrid_results, key=lambda item: (-item.final_score, item.candidate_id))[:top_k]
-    await session.execute(sa_delete(MatchResult).where(MatchResult.job_id == job.id))
+    existing_by_candidate: dict[str, MatchResult] = {}
+    selected_ids = [item.candidate_id for item in sorted_hybrid_results]
+    if selected_ids:
+        existing_result = await session.execute(
+            select(MatchResult).where(
+                MatchResult.job_id == job.id,
+                MatchResult.candidate_id.in_(selected_ids),
+            )
+        )
+        existing_by_candidate = {
+            match.candidate_id: match for match in existing_result.scalars().all()
+        }
     for rank, hybrid_result in enumerate(sorted_hybrid_results, start=1):
         reasoning = hybrid_result.to_dict()
         reasoning["rank"] = rank
-        
-        match = MatchResult(
-            job_id=job.id,
-            candidate_id=hybrid_result.candidate_id,
-            score=hybrid_result.final_score,
-            reasoning=reasoning,
-        )
-        session.add(match)
+
+        match = existing_by_candidate.get(hybrid_result.candidate_id)
+        if match is None:
+            match = MatchResult(
+                job_id=job.id,
+                candidate_id=hybrid_result.candidate_id,
+                score=hybrid_result.final_score,
+                reasoning=reasoning,
+            )
+            session.add(match)
+        else:
+            match.score = hybrid_result.final_score
+            match.reasoning = reasoning
         results.append(match)
     
     await session.commit()
@@ -255,22 +293,20 @@ async def _rank_legacy(
         if cand.total_years_experience is not None:
             skill_data["estimated_years"] = cand.total_years_experience
 
-        years_score = min(1.0, (skill_data.get("estimated_years", 0) / 10))
-        missing_penalty = 0.0
+        est_years = skill_data.get("estimated_years", 0) or 0
+        years_score = min(1.0, max(0.0, est_years / 10))
+        seniority_score = compute_seniority_score(job.seniority, est_years)
         total_required = len(job.required_skills)
-        if total_required > 0:
-            missing_count = len(skill_data.get("missing_required", []))
-            missing_penalty = 0.30 * (missing_count / total_required)
-
-        quick_score = round(
-            0.35 * skill_data["required_score"]
-            + 0.20 * skill_data["optional_score"]
-            + 0.10 * years_score
-            - missing_penalty,
-            4,
+        scoring = compute_explainable_score(
+            required_score=skill_data["required_score"],
+            optional_score=skill_data["optional_score"],
+            semantic_score=0.0,
+            years_score=years_score,
+            seniority_score=seniority_score,
+            has_required_skills=total_required > 0,
+            weights=LEGACY_QUICK_WEIGHTS,
         )
-        quick_score = max(0.0, min(1.0, quick_score))
-        quick_score = min(quick_score, _required_score_cap(skill_data["required_score"], total_required > 0))
+        quick_score = scoring["final_score"]
         scored_pre.append((cand, skill_data, quick_score))
 
     scored_pre.sort(key=lambda x: (-x[2], x[0].id))
@@ -300,80 +336,92 @@ async def _rank_legacy(
             pairs = [(job.description, text) for text in candidate_texts]
             cross_scores = await cross_encoder.predict(pairs)
             for (cand, _, _), cs in zip(top_n, cross_scores):
-                cross_scores_map[cand.id] = cs
+                if cs is not None:
+                    cross_scores_map[cand.id] = cs
         except Exception:
             logger.warning("Cross-encoder failed, using quick scores for top candidates")
 
     # ── Step 3: Compute final scores ──
     staged_results: list[tuple[Candidate, float, dict[str, Any]]] = []
     for cand, skill_data, quick_score in scored_pre:
-        years_score = min(1.0, (skill_data.get("estimated_years", 0) / 10))
-        missing_penalty = 0.0
+        est_years = skill_data.get("estimated_years", 0) or 0
+        years_score = min(1.0, max(0.0, est_years / 10))
+        seniority_score = compute_seniority_score(job.seniority, est_years)
         total_required = len(job.required_skills)
-        if total_required > 0:
-            missing_count = len(skill_data.get("missing_required", []))
-            missing_penalty = 0.30 * (missing_count / total_required)
+        base_scoring = compute_explainable_score(
+            required_score=skill_data["required_score"],
+            optional_score=skill_data["optional_score"],
+            semantic_score=0.0,
+            years_score=years_score,
+            seniority_score=seniority_score,
+            has_required_skills=total_required > 0,
+            weights=LEGACY_QUICK_WEIGHTS,
+        )
 
         cross_score = cross_scores_map.get(cand.id)
         if cross_score is not None:
-            final_score = round(
-                0.60 * cross_score
-                + 0.25 * skill_data["required_score"]
-                + 0.10 * skill_data["optional_score"]
-                + 0.05 * years_score
-                - missing_penalty,
-                4,
+            cross_weight = DEFAULT_WEIGHTS["cross_encoder"]
+            cap = _required_score_cap(skill_data["required_score"], total_required > 0)
+            cross_scoring = compute_cross_encoder_adjusted_score(
+                base_score=base_scoring["final_score"],
+                cross_score=cross_score,
+                score_cap=cap,
+                cross_weight=cross_weight,
             )
+            pre_cap_score = cross_scoring["pre_cap_score"]
+            final_score = cross_scoring["final_score"]
         else:
+            cross_weight = 0.0
+            cross_scoring = {}
+            pre_cap_score = base_scoring["pre_cap_score"]
+            cap = base_scoring["score_cap"]
             final_score = quick_score
 
-        final_score = max(0.0, min(1.0, final_score))
-        final_score = min(final_score, _required_score_cap(skill_data["required_score"], total_required > 0))
+        final_score = round(max(0.0, min(1.0, final_score)), 4)
 
         if cross_score is not None:
             score_weights = {
-                "cross_encoder": 0.60,
-                "skill_required": 0.25,
-                "skill_optional": 0.10,
-                "experience": 0.05,
+                **base_scoring["score_weights"],
+                "cross_encoder_adjustment": cross_weight,
             }
-            score_contributions = {
-                "cross_encoder": 0.60 * cross_score,
-                "skill_required": 0.25 * skill_data["required_score"],
-                "skill_optional": 0.10 * skill_data["optional_score"],
-                "experience": 0.05 * years_score,
-            }
-            scoring_model = "legacy_cross_encoder"
-            scoring_formula = (
-                "0.60 LLM deep rerank + 0.25 required skills + 0.10 optional skills "
-                "+ 0.05 experience - missing required penalty; then capped by required-skill coverage"
-            )
+            adjustment = cross_scoring["cross_encoder_adjustment"]
+            score_contributions = dict(base_scoring["score_contributions"])
+            score_penalties = {}
+            if adjustment > 0:
+                score_contributions["cross_encoder_adjustment"] = adjustment
+            elif adjustment < 0:
+                score_penalties["cross_encoder_adjustment"] = abs(adjustment)
+            scoring_model = "legacy_cross_encoder_adjusted"
+            scoring_formula = CROSS_ENCODER_SCORING_FORMULA
         else:
-            score_weights = {
-                "skill_required": 0.35,
-                "skill_optional": 0.20,
-                "experience": 0.10,
-            }
-            score_contributions = {
-                "skill_required": 0.35 * skill_data["required_score"],
-                "skill_optional": 0.20 * skill_data["optional_score"],
-                "experience": 0.10 * years_score,
-            }
+            score_weights = base_scoring["score_weights"]
+            score_contributions = base_scoring["score_contributions"]
+            score_penalties = base_scoring["score_penalties"]
             scoring_model = "legacy_quick"
             scoring_formula = (
-                "0.35 required skills + 0.20 optional skills + 0.10 experience "
-                "- missing required penalty; then capped by required-skill coverage"
+                "0.70 required skills + 0.20 optional skills + 0.05 experience + 0.05 seniority; "
+                "then capped by required-skill coverage"
             )
-
-        pre_cap_score = max(0.0, sum(score_contributions.values()) - missing_penalty)
-        cap = _required_score_cap(skill_data["required_score"], total_required > 0)
+        score_trace = {
+            **base_scoring["score_trace"],
+            "job_id": job.id,
+            "candidate_id": cand.id,
+            "cross_encoder_score": round(clamp_score(cross_score), 4) if cross_score is not None else None,
+            "cross_encoder_adjustment": cross_scoring.get("cross_encoder_adjustment"),
+            "cross_encoder_max_adjustment": cross_scoring.get("cross_encoder_max_adjustment"),
+            "pre_cap_score": round(pre_cap_score, 4),
+            "score_cap": round(cap, 4),
+            "cap_applied": pre_cap_score > cap,
+            "final_score": final_score,
+        }
 
         reasoning = {
             "scoring_model": scoring_model,
             "scoring_formula": scoring_formula,
             "score_weights": {k: round(v, 4) for k, v in score_weights.items()},
             "score_contributions": {k: round(v, 4) for k, v in score_contributions.items()},
-            "score_penalties": {"missing_required": round(missing_penalty, 4)} if missing_penalty else {},
+            "score_penalties": {k: round(v, 4) for k, v in score_penalties.items()},
+            "score_trace": score_trace,
             "pre_cap_score": round(pre_cap_score, 4),
             "score_cap": round(cap, 4),
             "score_cap_reason": _required_score_cap_reason(skill_data["required_score"], total_required > 0),
@@ -382,7 +430,7 @@ async def _rank_legacy(
             "final_score": final_score,
             "rank": 0,
             "years_score": round(years_score, 4),
-            "missing_penalty": round(missing_penalty, 4),
+            "missing_penalty": 0.0,
             "used_cross_encoder": cross_score is not None,
         }
 
@@ -391,12 +439,27 @@ async def _rank_legacy(
     staged_results.sort(key=lambda item: (-item[1], item[0].id))
     selected_results = staged_results[:top_k]
     results: list[MatchResult] = []
-    from sqlalchemy import delete as sa_delete
-    await session.execute(sa_delete(MatchResult).where(MatchResult.job_id == job.id))
+    existing_by_candidate: dict[str, MatchResult] = {}
+    selected_ids = [cand.id for cand, _, _ in selected_results]
+    if selected_ids:
+        existing_result = await session.execute(
+            select(MatchResult).where(
+                MatchResult.job_id == job.id,
+                MatchResult.candidate_id.in_(selected_ids),
+            )
+        )
+        existing_by_candidate = {
+            match.candidate_id: match for match in existing_result.scalars().all()
+        }
     for rank, (cand, final_score, reasoning) in enumerate(selected_results, start=1):
         reasoning["rank"] = rank
-        match = MatchResult(job_id=job.id, candidate_id=cand.id, score=final_score, reasoning=reasoning)
-        session.add(match)
+        match = existing_by_candidate.get(cand.id)
+        if match is None:
+            match = MatchResult(job_id=job.id, candidate_id=cand.id, score=final_score, reasoning=reasoning)
+            session.add(match)
+        else:
+            match.score = final_score
+            match.reasoning = reasoning
         results.append(match)
     await session.commit()
     sorted_results = sorted(results, key=lambda item: (-item.score, item.candidate_id))
@@ -409,12 +472,18 @@ async def _rank_legacy(
 
 
 async def _get_candidate(session: AsyncSession, candidate_id: str) -> Candidate | None:
+    """
+    Loads one candidate by ID from the database.
+    """
     stmt = select(Candidate).where(Candidate.id == candidate_id)
     result = await session.execute(stmt)
     return result.scalar_one_or_none()
 
 
 async def _get_all_candidates(session: AsyncSession) -> list[Candidate]:
+    """
+    Loads all candidates available for matching.
+    """
     stmt = select(Candidate)
     result = await session.execute(stmt)
     return list(result.scalars().all())

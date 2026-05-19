@@ -4,7 +4,7 @@ import logging
 import re
 
 from app.schemas.job import JobProfile
-from app.services.skill_catalog import SKILL_KEYWORDS, skill_in_text
+from app.services.skill_catalog import SKILL_KEYWORDS, extract_catalog_skills, normalize_text_for_skill_matching, skill_in_text
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +30,10 @@ BONUS_PHRASE_PATTERN = re.compile(
 
 
 def parse_job_description(text: str) -> JobProfile:
+    """
+    Parses a job description into title, required skills, optional skills, and
+    seniority.
+    """
     normalized = _normalize_text(text)
     required = _extract_section_skills(text, REQUIREMENT_HEADERS)
     optional = _extract_section_skills(text, OPTIONAL_HEADERS)
@@ -63,6 +67,9 @@ def parse_job_description(text: str) -> JobProfile:
 
 
 def _extract_bonus_skills(text: str) -> set[str]:
+    """
+    Extracts skills from lines marked as bonus or preferred.
+    """
     lines = text.splitlines()
     bonus_skills: set[str] = set()
     for line in lines:
@@ -75,6 +82,9 @@ def _extract_bonus_skills(text: str) -> set[str]:
 
 
 def _extract_title(text: str) -> str | None:
+    """
+    Uses the first non-empty line as the likely job title.
+    """
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if lines:
         return lines[0][:120]
@@ -82,21 +92,23 @@ def _extract_title(text: str) -> str | None:
 
 
 def _normalize_text(text: str) -> str:
-    lowered = text.lower()
-    lowered = lowered.replace("/", " ")
-    lowered = re.sub(r"[^a-z0-9+#.\s]", " ", lowered)
-    return re.sub(r"\s+", " ", lowered).strip()
+    """
+    Normalizes job text for skill matching.
+    """
+    return normalize_text_for_skill_matching(text)
 
 
 def _extract_skills(normalized_text: str) -> list[str]:
-    skills: set[str] = set()
-    for skill in SKILL_KEYWORDS:
-        if skill_in_text(skill, normalized_text):
-            skills.add(skill)
-    return sorted(skills)
+    """
+    Extracts catalog skills from normalized job text.
+    """
+    return extract_catalog_skills(normalized_text)
 
 
 def _extract_section_skills(text: str, header_pattern: re.Pattern[str]) -> list[str]:
+    """
+    Extracts skills from a labeled job description section.
+    """
     lines = [line.strip() for line in text.splitlines()]
     in_section = False
     collected: list[str] = []
@@ -119,6 +131,9 @@ def _extract_section_skills(text: str, header_pattern: re.Pattern[str]) -> list[
 
 
 def _detect_seniority(text: str) -> str | None:
+    """
+    Detects job seniority from common seniority phrases.
+    """
     for label, pattern in SENIORITY_PATTERNS.items():
         if pattern.search(text):
             return label

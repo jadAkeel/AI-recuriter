@@ -19,6 +19,9 @@ router = APIRouter()
 
 
 async def _read_limited_upload(file: UploadFile) -> bytes:
+    """
+    Reads an upload while enforcing the configured size limit.
+    """
     content = await file.read(settings.max_upload_bytes + 1)
     if len(content) > settings.max_upload_bytes:
         max_mb = settings.max_upload_bytes // (1024 * 1024)
@@ -35,6 +38,9 @@ async def parse_cv(
     ),
     _: User = Depends(require_any_role("owner", "admin", "recruiter", "candidate")),
 ) -> CandidateProfile:
+    """
+    Parses an uploaded CV and returns the extracted candidate profile.
+    """
     try:
         content = await _read_limited_upload(file)
         text = extract_text(file.filename or "", content)

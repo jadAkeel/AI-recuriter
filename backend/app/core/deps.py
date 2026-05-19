@@ -14,10 +14,14 @@ security = HTTPBearer(auto_error=False)
 STAFF_ROLES = {"owner", "admin", "recruiter"}
 
 
+# Extract authenticated user from the Bearer token
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
     session: AsyncSession = Depends(get_db_session),
 ) -> User:
+    """
+    Authenticates the request and returns the current user.
+    """
     if credentials is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
 
@@ -33,7 +37,13 @@ async def get_current_user(
 
 
 def require_role(role: str):
+    """
+    Builds a dependency that requires one exact user role.
+    """
     async def _check(user: User = Depends(get_current_user)) -> User:
+        """
+        Checks the current user role for a FastAPI dependency.
+        """
         if user.role != role:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
         return user
@@ -41,9 +51,15 @@ def require_role(role: str):
 
 
 def require_any_role(*roles: str):
+    """
+    Builds a dependency that accepts any listed user role.
+    """
     allowed = {role.lower() for role in roles}
 
     async def _check(user: User = Depends(get_current_user)) -> User:
+        """
+        Checks the current user role for a FastAPI dependency.
+        """
         if user.role.lower() not in allowed:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
         return user

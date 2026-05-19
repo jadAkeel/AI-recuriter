@@ -22,6 +22,9 @@ async def ingest(
     _: User = Depends(require_any_role("owner", "admin", "recruiter")),
     session: AsyncSession = Depends(get_db_session),
 ) -> IngestResponse:
+    """
+    Adds one knowledge document through the RAG API.
+    """
     return await add_document(session, request.title, request.content, request.category, request.tags)
 
 
@@ -30,6 +33,9 @@ async def seed_knowledge(
     _: User = Depends(require_any_role("owner", "admin", "recruiter")),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
+    """
+    Seeds the built-in RAG knowledge base.
+    """
     count = await ingest_knowledge_base(session)
     return {"seeded": count}
 
@@ -40,4 +46,7 @@ async def query(
     _: User = Depends(require_any_role("owner", "admin", "recruiter", "candidate")),
     session: AsyncSession = Depends(get_db_session),
 ) -> QueryResponse:
+    """
+    Queries the RAG knowledge base for relevant documents.
+    """
     return await query_knowledge(session, request.query, request.category, request.top_k)

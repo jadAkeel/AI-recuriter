@@ -16,6 +16,9 @@ class RegisterRequest(BaseModel):
     @field_validator("email")
     @classmethod
     def _validate_email(cls, value: str) -> str:
+        """
+        Validates and normalizes an email address.
+        """
         normalized = value.strip().lower()
         if not EMAIL_PATTERN.match(normalized):
             raise ValueError("Invalid email address")
@@ -24,6 +27,9 @@ class RegisterRequest(BaseModel):
     @field_validator("full_name")
     @classmethod
     def _normalize_full_name(cls, value: str) -> str:
+        """
+        Normalizes a user full name.
+        """
         return " ".join(value.strip().split())
 
 
@@ -34,6 +40,9 @@ class LoginRequest(BaseModel):
     @field_validator("email")
     @classmethod
     def _validate_email(cls, value: str) -> str:
+        """
+        Validates and normalizes an email address.
+        """
         normalized = value.strip().lower()
         if not EMAIL_PATTERN.match(normalized):
             raise ValueError("Invalid email address")
@@ -63,6 +72,9 @@ class UpdateRoleRequest(BaseModel):
     @field_validator("role")
     @classmethod
     def _validate_role(cls, value: str) -> str:
+        """
+        Validates and normalizes a user role.
+        """
         role = value.lower().strip()
         if role not in VALID_ROLES:
             raise ValueError("Invalid role")

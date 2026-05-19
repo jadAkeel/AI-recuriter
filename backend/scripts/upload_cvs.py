@@ -19,6 +19,9 @@ BACKOFF = 2
 
 
 def file_sha256(path: Path) -> str:
+    """
+    Calculates the SHA-256 hash of a file.
+    """
     digest = hashlib.sha256()
     with path.open("rb") as f:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
@@ -27,6 +30,9 @@ def file_sha256(path: Path) -> str:
 
 
 def collect_files(folder: Path) -> list[Path]:
+    """
+    Collects uploadable CV files from a folder.
+    """
     files: list[Path] = []
     for ext in ALLOWED_EXTENSIONS:
         files.extend(folder.glob(f"*{ext}"))
@@ -35,6 +41,9 @@ def collect_files(folder: Path) -> list[Path]:
 
 
 def validate_files(files: list[Path]) -> tuple[list[Path], list[str]]:
+    """
+    Separates valid CV files from rejected files.
+    """
     accepted: list[Path] = []
     rejected: list[str] = []
     seen_hashes: set[str] = set()
@@ -66,6 +75,9 @@ def upload_file(
     cv_path: Path,
     token: str | None,
 ) -> dict:
+    """
+    Uploads one CV file to the backend API.
+    """
     headers = {"Authorization": f"Bearer {token}"} if token else {}
 
     with cv_path.open("rb") as fh:
@@ -89,6 +101,9 @@ def upload_file(
 
 
 def login(email: str, password: str) -> str | None:
+    """
+    Authenticates a user and returns access and refresh tokens.
+    """
     try:
         resp = httpx.post(API_BASE + "/auth/login", json={"email": email, "password": password}, timeout=30)
         if resp.status_code == 200:
@@ -100,6 +115,9 @@ def login(email: str, password: str) -> str | None:
 
 
 def main() -> None:
+    """
+    Runs this script from the command line.
+    """
     parser = argparse.ArgumentParser(description="Upload CVs to AI Recruiter API")
     parser.add_argument(
         "--token",

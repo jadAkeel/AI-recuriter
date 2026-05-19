@@ -18,14 +18,23 @@ VALID_ROLES = {"candidate", "recruiter", "admin", "owner"}
 
 
 def normalize_email(email: str) -> str:
+    """
+    Normalizes an email address before lookup or storage.
+    """
     return email.strip().lower()
 
 
 def hash_password(password: str) -> str:
+    """
+    Hashes a password for safe storage.
+    """
     return pwd_context.hash(password)
 
 
 def verify_password(plain: str, hashed: str) -> bool:
+    """
+    Checks a plain password against a stored password hash.
+    """
     try:
         return pwd_context.verify(plain, hashed)
     except Exception:
@@ -33,6 +42,9 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 
 def create_access_token(user_id: str, role: str) -> str:
+    """
+    Creates a signed JWT access token for a user.
+    """
     now = datetime.now(timezone.utc)
     payload = {
         "sub": user_id,
@@ -45,6 +57,9 @@ def create_access_token(user_id: str, role: str) -> str:
 
 
 def create_refresh_token(user_id: str) -> str:
+    """
+    Creates a signed JWT refresh token for a user.
+    """
     now = datetime.now(timezone.utc)
     payload = {
         "sub": user_id,
@@ -56,6 +71,9 @@ def create_refresh_token(user_id: str) -> str:
 
 
 def decode_token(token: str) -> dict | None:
+    """
+    Decodes and validates a JWT token payload.
+    """
     try:
         payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[ALGORITHM])
         return payload if isinstance(payload, dict) else None
@@ -64,6 +82,9 @@ def decode_token(token: str) -> dict | None:
 
 
 async def register_user(session: AsyncSession, email: str, password: str, full_name: str) -> User:
+    """
+    Creates a new user account with a hashed password.
+    """
     email = normalize_email(email)
     full_name = " ".join(full_name.strip().split())
     stmt = select(User).where(User.email == email)
@@ -84,6 +105,9 @@ async def register_user(session: AsyncSession, email: str, password: str, full_n
 
 
 async def authenticate_user(session: AsyncSession, email: str, password: str) -> User | None:
+    """
+    Authenticates a user by email and password.
+    """
     stmt = select(User).where(User.email == normalize_email(email))
     result = await session.execute(stmt)
     user = result.scalar_one_or_none()
@@ -93,24 +117,36 @@ async def authenticate_user(session: AsyncSession, email: str, password: str) ->
 
 
 async def get_user_by_id(session: AsyncSession, user_id: str) -> User | None:
+    """
+    Loads a user by database ID.
+    """
     stmt = select(User).where(User.id == user_id)
     result = await session.execute(stmt)
     return result.scalar_one_or_none()
 
 
 async def get_user_by_email(session: AsyncSession, email: str) -> User | None:
+    """
+    Loads a user by normalized email address.
+    """
     stmt = select(User).where(User.email == normalize_email(email))
     result = await session.execute(stmt)
     return result.scalar_one_or_none()
 
 
 async def list_users(session: AsyncSession) -> list[User]:
+    """
+    Lists all users ordered by email.
+    """
     stmt = select(User).order_by(User.email.asc())
     result = await session.execute(stmt)
     return list(result.scalars().all())
 
 
 async def update_user_role(session: AsyncSession, user_id: str, role: str) -> User:
+    """
+    Updates a user role after validating allowed roles.
+    """
     normalized_role = role.lower().strip()
     if normalized_role not in VALID_ROLES:
         raise ValueError(f"Invalid role: {role}")

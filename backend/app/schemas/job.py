@@ -2,17 +2,14 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.services.skill_catalog import normalize_skill_list
+
 
 def _normalize_skill_list(values: list[str]) -> list[str]:
-    normalized: list[str] = []
-    seen: set[str] = set()
-    for item in values or []:
-        skill = " ".join(str(item).strip().lower().split())
-        if not skill or skill in seen:
-            continue
-        seen.add(skill)
-        normalized.append(skill[:120])
-    return normalized
+    """
+    Normalizes skill lists for API schemas or job records.
+    """
+    return normalize_skill_list(values)[:120]
 
 
 class JobProfile(BaseModel):
@@ -27,6 +24,9 @@ class JobProfile(BaseModel):
     @field_validator("title")
     @classmethod
     def _normalize_title(cls, value: str | None) -> str | None:
+        """
+        Normalizes an optional job title.
+        """
         if value is None:
             return None
         cleaned = " ".join(value.strip().split())
@@ -35,16 +35,25 @@ class JobProfile(BaseModel):
     @field_validator("description", mode="before")
     @classmethod
     def _normalize_description_value(cls, value: str) -> str:
+        """
+        Normalizes required job description text.
+        """
         return value.strip()
 
     @field_validator("required_skills", "optional_skills")
     @classmethod
     def _normalize_skills(cls, values: list[str]) -> list[str]:
+        """
+        Normalizes job skill lists.
+        """
         return _normalize_skill_list(values)
 
     @field_validator("seniority")
     @classmethod
     def _normalize_seniority(cls, value: str | None) -> str | None:
+        """
+        Normalizes job seniority labels.
+        """
         if value is None:
             return None
         seniority = value.strip().lower()
@@ -57,6 +66,9 @@ class JobParseRequest(BaseModel):
     @field_validator("description")
     @classmethod
     def _normalize_description(cls, value: str) -> str:
+        """
+        Normalizes update request job description text.
+        """
         normalized = value.strip()
         if not normalized:
             raise ValueError("description cannot be empty")
@@ -73,11 +85,17 @@ class JobUpdateRequest(BaseModel):
     @field_validator("required_skills", "optional_skills")
     @classmethod
     def _normalize_optional_skills(cls, values: list[str] | None) -> list[str] | None:
+        """
+        Normalizes optional skills when provided on an update request.
+        """
         return _normalize_skill_list(values or []) if values is not None else None
 
     @field_validator("seniority")
     @classmethod
     def _normalize_update_seniority(cls, value: str | None) -> str | None:
+        """
+        Normalizes optional seniority on a job update request.
+        """
         if value is None:
             return None
         seniority = value.strip().lower()

@@ -20,19 +20,28 @@ from app.core.security import RateLimitMiddleware, SecurityHeadersMiddleware
 logger = logging.getLogger(__name__)
 
 
+# Background worker that processes CV uploads from the task queue
 async def _cv_worker():
+    """
+    Runs the background worker that processes queued CV uploads.
+    """
     from app.services.task_queue import run_cv_worker
     from app.core.db import SessionLocal
     from app.services.enhanced_cv_parser import get_enhanced_cv_parser
     from app.services.cv_parser import extract_text, parse_cv_text
-    from app.services.embedding import get_embedding_service
+    from app.services.candidate_text import build_candidate_embedding_text_from_profile
+    from app.services.embedding import embedding_metadata_for_text, get_embedding_service
     from app.services.vector_store import VectorStore
     from app.models.candidate import Candidate
     from sqlalchemy import select
     from pathlib import Path
     import uuid
 
+    # Save the uploaded CV file to disk for later download
     def _save_processed_cv(candidate_id: str, file_name: str, content: bytes) -> str:
+        """
+        Saves a processed CV file and returns its API URL.
+        """
         storage = Path(settings.cv_storage_path)
         storage.mkdir(parents=True, exist_ok=True)
         ext = Path(file_name).suffix.lower()
@@ -42,12 +51,60 @@ async def _cv_worker():
         dest.write_bytes(content)
         return f"/api/v1/candidates/{candidate_id}/cv"
 
+    # Remove old CV files when a candidate is re-uploaded
+    def _delete_processed_cv_files(candidate_id: str) -> None:
+        """
+        Removes old stored CV files for a candidate.
+        """
+        storage = Path(settings.cv_storage_path)
+        for ext in (".pdf", ".docx", ".txt"):
+            (storage / f"{candidate_id}{ext}").unlink(missing_ok=True)
+
+    # Copy all parsed profile fields onto the DB candidate record
+    def _apply_profile_to_candidate(candidate: Candidate, profile) -> None:
+        """
+        Copies parsed profile fields onto a candidate database model.
+        """
+        candidate.full_name = profile.full_name
+        candidate.email = profile.email
+        candidate.phone = profile.phone
+        candidate.skills = profile.skills
+        candidate.skills_detailed = [s.model_dump() for s in (profile.skills_detailed or [])]
+        candidate.experience = profile.experience
+        candidate.experience_entries = [e.model_dump() for e in (profile.experience_entries or [])]
+        candidate.education = profile.education
+        candidate.education_entries = [e.model_dump() for e in (profile.education_entries or [])]
+        candidate.projects = profile.projects
+        candidate.raw_text = profile.raw_text
+        candidate.total_years_experience = profile.total_years_experience
+        candidate.negative_skills = profile.negative_skills or None
+        candidate.learning_skills = profile.learning_skills or None
+
+    # Generate and store vector embedding for the parsed candidate
+    async def _upsert_candidate_embedding(session, candidate_id: str, profile) -> None:
+        """
+        Creates or updates the embedding stored for a candidate profile.
+        """
+        embedder = get_embedding_service()
+        embedding_text = build_candidate_embedding_text_from_profile(profile)
+        embedding = (await embedder.embed([embedding_text]))[0]
+        store = VectorStore(session)
+        await store.upsert_embedding(
+            "candidate",
+            candidate_id,
+            embedding,
+            metadata=embedding_metadata_for_text(embedding_text),
+        )
+
     async def process_cv(
         cv_text: str | None,
         file_name: str,
         use_llm: bool,
         file_path: str | None = None,
     ) -> dict:
+        """
+        Processes one queued CV upload into a candidate record.
+        """
         content: bytes | None = None
         pending_path = Path(file_path) if file_path else None
         if pending_path and pending_path.exists():
@@ -65,37 +122,35 @@ async def _cv_worker():
                 result = await session.execute(stmt)
                 existing = result.scalar_one_or_none()
                 if existing:
-                    cv_url = (
-                        _save_processed_cv(existing.id, file_name, content)
-                        if content is not None
-                        else f"/api/v1/candidates/{existing.id}/cv"
-                    )
+                    _apply_profile_to_candidate(existing, profile)
+                    await session.commit()
+                    if content is not None:
+                        _delete_processed_cv_files(existing.id)
+                        cv_url = _save_processed_cv(existing.id, file_name, content)
+                    else:
+                        cv_url = f"/api/v1/candidates/{existing.id}/cv"
+                    try:
+                        await _upsert_candidate_embedding(session, existing.id, profile)
+                    except Exception:
+                        logger.warning(
+                            "Embedding update failed for existing candidate %s - candidate data saved",
+                            existing.id,
+                        )
                     if pending_path:
                         pending_path.unlink(missing_ok=True)
                     return {
                         "candidate_id": existing.id,
                         "cv_url": cv_url,
-                        "full_name": existing.full_name,
-                        "email": existing.email,
-                        "skills": existing.skills,
-                        "total_years_experience": existing.total_years_experience,
-                        "status": "exists",
+                        "full_name": profile.full_name,
+                        "email": profile.email,
+                        "skills": profile.skills,
+                        "total_years_experience": profile.total_years_experience,
+                        "status": "updated",
                     }
 
             candidate_id = str(uuid.uuid4())
-            candidate = Candidate(
-                id=candidate_id, full_name=profile.full_name, email=profile.email,
-                phone=profile.phone, skills=profile.skills,
-                skills_detailed=[s.model_dump() for s in (profile.skills_detailed or [])],
-                experience=profile.experience,
-                experience_entries=[e.model_dump() for e in (profile.experience_entries or [])],
-                education=profile.education,
-                education_entries=[e.model_dump() for e in (profile.education_entries or [])],
-                projects=profile.projects, raw_text=cv_text,
-                total_years_experience=profile.total_years_experience,
-                negative_skills=profile.negative_skills or None,
-                learning_skills=profile.learning_skills or None,
-            )
+            candidate = Candidate(id=candidate_id)
+            _apply_profile_to_candidate(candidate, profile)
             session.add(candidate)
             await session.commit()
 
@@ -107,16 +162,8 @@ async def _cv_worker():
             if pending_path:
                 pending_path.unlink(missing_ok=True)
 
-            parts = [f"Skills: {', '.join(profile.skills)}"]
-            if profile.experience:
-                parts.append(f"Experience: {' '.join(profile.experience[:10])}")
-            if profile.education:
-                parts.append(f"Education: {' '.join(profile.education[:5])}")
             try:
-                embedder = get_embedding_service()
-                embedding = (await embedder.embed([". ".join(parts)]))[0]
-                store = VectorStore(session)
-                await store.upsert_embedding("candidate", candidate_id, embedding)
+                await _upsert_candidate_embedding(session, candidate_id, profile)
             except Exception:
                 logger.warning(
                     "Embedding generation failed for candidate %s — candidate created without vector",
@@ -138,6 +185,9 @@ async def _cv_worker():
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    """
+    Starts and stops application resources around the FastAPI lifespan.
+    """
     configure_logging()
     try:
         settings.validate_runtime()
@@ -162,11 +212,14 @@ async def lifespan(_: FastAPI):
 
 
 def create_app() -> FastAPI:
+    """
+    Creates and configures the FastAPI application.
+    """
     app = FastAPI(title=settings.app_name, lifespan=lifespan)
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(GZipMiddleware, minimum_size=1024)
-    if settings.trusted_hosts:
-        app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.trusted_hosts)
+    trusted = settings.trusted_hosts + ["*.ngrok-free.app", "*.ngrok-free.dev", "*.ngrok.io", "localhost", "127.0.0.1"]
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=trusted)
     if settings.rate_limit_enabled:
         app.add_middleware(
             RateLimitMiddleware,
@@ -176,6 +229,7 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
+        allow_origin_regex=r"https?://(.*\.ngrok-free\.(app|dev)|.*\.ngrok\.io|lhr\.life|localhost:\d+)",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -184,6 +238,9 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+        """
+        Logs unhandled errors and returns a generic API error response.
+        """
         logger.exception("Unhandled application error", extra={"path": request.url.path})
         return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 

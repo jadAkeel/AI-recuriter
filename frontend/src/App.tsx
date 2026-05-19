@@ -16,6 +16,7 @@ import UploadCV from './pages/candidate/UploadCV';
 import CandidateInterview from './pages/candidate/Interview';
 import CandidateResults from './pages/candidate/Results';
 import PublicInterview from './pages/PublicInterview';
+import LiveInterview from './pages/LiveInterview';
 import VideoInterview from './pages/VideoInterview';
 
 const staffRoles = ['owner', 'admin', 'recruiter'];
@@ -61,6 +62,7 @@ function App() {
             <Route path="/my-results" element={<ProtectedRoute><CandidateResults /></ProtectedRoute>} />
           </Route>
           <Route path="/interview/:session_id" element={<PublicInterview />} />
+          <Route path="/interview/live/:session_id" element={<LiveInterview />} />
           <Route path="/interview/video/:session_id" element={<VideoInterview />} />
           <Route path="*" element={<HomeRedirect />} />
         </Routes>

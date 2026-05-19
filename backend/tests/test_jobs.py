@@ -18,6 +18,101 @@ _VEC_384 = [0.0] * 384
 
 
 @pytest.mark.asyncio
+async def test_update_job_clears_stale_match_results_when_matching_inputs_change():
+    """
+    Checks that update job clears stale match results when matching inputs change.
+    """
+    await init_db()
+    async with SessionLocal() as session:
+        user = User(
+            id=str(uuid.uuid4()),
+            email="admin@update.com",
+            password_hash=hash_password("p"),
+            full_name="Admin",
+            role="owner",
+        )
+        job_id = str(uuid.uuid4())
+        session.add_all([
+            user,
+            Job(
+                id=job_id,
+                title="Frontend Engineer",
+                description="Need React.",
+                required_skills=["react"],
+                optional_skills=[],
+                seniority="mid",
+            ),
+            MatchResult(
+                job_id=job_id,
+                candidate_id=str(uuid.uuid4()),
+                score=1.0,
+                reasoning={"matched_required": ["react"]},
+            ),
+        ])
+        await session.commit()
+
+    app = create_app()
+    with TestClient(app) as client:
+        login = client.post("/api/v1/auth/login", json={"email": "admin@update.com", "password": "p"})
+        token = login.json()["access_token"]
+        response = client.patch(
+            f"/api/v1/jobs/{job_id}",
+            json={"required_skills": ["react", "typescript"]},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200, response.text
+    async with SessionLocal() as session:
+        rows = (await session.execute(select(MatchResult).where(MatchResult.job_id == job_id))).scalars().all()
+        assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_update_job_canonicalizes_skill_aliases_before_persisting():
+    """
+    Checks that update job canonicalizes skill aliases before persisting.
+    """
+    await init_db()
+    async with SessionLocal() as session:
+        user = User(
+            id=str(uuid.uuid4()),
+            email="admin@aliases.com",
+            password_hash=hash_password("p"),
+            full_name="Admin",
+            role="owner",
+        )
+        job_id = str(uuid.uuid4())
+        session.add_all([
+            user,
+            Job(
+                id=job_id,
+                title="Junior Backend",
+                description="Need APIs.",
+                required_skills=["python"],
+                optional_skills=[],
+                seniority="junior",
+            ),
+        ])
+        await session.commit()
+
+    app = create_app()
+    with TestClient(app) as client:
+        login = client.post("/api/v1/auth/login", json={"email": "admin@aliases.com", "password": "p"})
+        token = login.json()["access_token"]
+        response = client.patch(
+            f"/api/v1/jobs/{job_id}",
+            json={"optional_skills": ["mongose", "RESTful APIs"]},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["optional_skills"] == ["mongoose", "rest api"]
+    async with SessionLocal() as session:
+        job = (await session.execute(select(Job).where(Job.id == job_id))).scalar_one()
+        assert job.optional_skills == ["mongoose", "rest api"]
+
+
+@pytest.mark.asyncio
 async def test_delete_job_happy_path():
     """Delete a job that has related MatchResult, InterviewSession, Report, Embedding."""
     await init_db()

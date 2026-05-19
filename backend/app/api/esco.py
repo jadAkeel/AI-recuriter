@@ -17,6 +17,9 @@ router = APIRouter()
 
 
 def _ensure_esco_enabled() -> None:
+    """
+    Rejects ESCO API calls when ESCO extraction is disabled.
+    """
     if not settings.esco_api_enabled:
         raise HTTPException(status_code=503, detail="ESCO API integration is disabled")
 
@@ -40,6 +43,9 @@ class EscoExtractRequest(BaseModel):
 async def esco_skill_count(
     _: User = Depends(require_any_role("owner", "admin", "recruiter")),
 ) -> dict[str, int]:
+    """
+    Returns the number of ESCO skills currently available.
+    """
     _ensure_esco_enabled()
     extractor = await get_esco_extractor()
     count = await extractor.skill_count()
@@ -51,6 +57,9 @@ async def extract_skills_esco(
     request: EscoExtractRequest,
     _: User = Depends(require_any_role("owner", "admin", "recruiter")),
 ) -> EscoExtractionResult:
+    """
+    Extracts ESCO skill matches from submitted text.
+    """
     _ensure_esco_enabled()
     extractor = await get_esco_extractor()
     try:
@@ -65,6 +74,9 @@ async def extract_skills_esco(
 async def refresh_esco_cache(
     _: User = Depends(require_any_role("owner", "admin")),
 ) -> dict[str, int]:
+    """
+    Fetches ESCO skills again and refreshes the local cache.
+    """
     _ensure_esco_enabled()
     extractor = await get_esco_extractor()
     count = await extractor.fetch_and_cache()

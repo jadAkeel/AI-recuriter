@@ -4,8 +4,13 @@ from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.services.skill_catalog import normalize_skill_list, normalize_skill_name
+
 
 def _clean_optional_text(value: str | None, max_length: int = 500) -> str | None:
+    """
+    Trims optional text and limits its length.
+    """
     if value is None:
         return None
     cleaned = " ".join(str(value).split())
@@ -13,6 +18,9 @@ def _clean_optional_text(value: str | None, max_length: int = 500) -> str | None
 
 
 def _normalize_string_list(values: list[str], *, lowercase: bool = False, max_items: int = 100) -> list[str]:
+    """
+    Cleans, de-duplicates, and optionally lowercases a string list.
+    """
     normalized: list[str] = []
     seen: set[str] = set()
     for item in values or []:
@@ -62,7 +70,10 @@ class SkillDetail(BaseModel):
     @field_validator("name")
     @classmethod
     def _normalize_name(cls, value: str) -> str:
-        cleaned = " ".join(str(value).strip().lower().split())
+        """
+        Normalizes a skill name field.
+        """
+        cleaned = normalize_skill_name(value)
         if not cleaned:
             raise ValueError("skill name cannot be empty")
         return cleaned[:120]
@@ -70,6 +81,9 @@ class SkillDetail(BaseModel):
     @field_validator("years", mode="before")
     @classmethod
     def _normalize_years(cls, value: float | None) -> float | None:
+        """
+        Clamps years of experience to a realistic range.
+        """
         if value is None:
             return None
         try:
@@ -80,6 +94,9 @@ class SkillDetail(BaseModel):
     @field_validator("confidence", mode="before")
     @classmethod
     def _normalize_confidence(cls, value: float) -> float:
+        """
+        Clamps confidence values to the score range.
+        """
         try:
             return max(0.0, min(1.0, float(value)))
         except (TypeError, ValueError):
@@ -88,6 +105,9 @@ class SkillDetail(BaseModel):
     @field_validator("context", "esco_uri", "preferred_label", "category")
     @classmethod
     def _normalize_optional_text(cls, value: str | None) -> str | None:
+        """
+        Cleans optional text fields before validation completes.
+        """
         return _clean_optional_text(value)
 
 
@@ -104,12 +124,18 @@ class ExperienceEntry(BaseModel):
     @field_validator("title", "company", "start_date", "end_date", "description")
     @classmethod
     def _normalize_optional_text(cls, value: str | None) -> str | None:
+        """
+        Cleans optional text fields before validation completes.
+        """
         return _clean_optional_text(value)
 
     @field_validator("skills_used")
     @classmethod
     def _normalize_skills_used(cls, values: list[str]) -> list[str]:
-        return _normalize_string_list(values, lowercase=True, max_items=50)
+        """
+        Normalizes skills listed on an experience entry.
+        """
+        return normalize_skill_list(values)[:50]
 
 
 class EducationEntry(BaseModel):
@@ -125,6 +151,9 @@ class EducationEntry(BaseModel):
     @field_validator("degree", "institution", "start_date", "end_date", "gpa", "description")
     @classmethod
     def _normalize_optional_text(cls, value: str | None) -> str | None:
+        """
+        Cleans optional text fields before validation completes.
+        """
         return _clean_optional_text(value)
 
 
@@ -161,26 +190,41 @@ class CandidateProfile(BaseModel):
     @field_validator("full_name", "email", "phone", "location", "highest_degree", "summary")
     @classmethod
     def _normalize_optional_text(cls, value: str | None) -> str | None:
+        """
+        Cleans optional text fields before validation completes.
+        """
         return _clean_optional_text(value)
 
     @field_validator("skills", "negative_skills", "learning_skills")
     @classmethod
     def _normalize_skill_lists(cls, values: list[str]) -> list[str]:
-        return _normalize_string_list(values, lowercase=True, max_items=120)
+        """
+        Normalizes candidate skill list fields.
+        """
+        return normalize_skill_list(values)[:120]
 
     @field_validator("experience", "education", "projects")
     @classmethod
     def _normalize_text_lists(cls, values: list[str]) -> list[str]:
+        """
+        Normalizes candidate text list fields.
+        """
         return _normalize_string_list(values, lowercase=False, max_items=100)
 
     @field_validator("languages")
     @classmethod
     def _normalize_languages(cls, values: list[str]) -> list[str]:
+        """
+        Normalizes language names to lowercase.
+        """
         return _normalize_string_list(values, lowercase=True, max_items=20)
 
     @field_validator("total_years_experience", mode="before")
     @classmethod
     def _normalize_total_years(cls, value: float | None) -> float | None:
+        """
+        Clamps total years of experience to a realistic range.
+        """
         if value is None:
             return None
         try:
@@ -191,6 +235,9 @@ class CandidateProfile(BaseModel):
     @field_validator("raw_text")
     @classmethod
     def _normalize_raw_text(cls, value: str) -> str:
+        """
+        Normalizes stored raw CV text.
+        """
         return str(value or "").strip()
 
 

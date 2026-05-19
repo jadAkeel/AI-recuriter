@@ -30,6 +30,9 @@ class Embedding(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     entity_type: Mapped[str] = mapped_column(String(50), index=True)
     entity_id: Mapped[str] = mapped_column(String(64), index=True)
+    provider: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    model_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    source_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     embedding_json: Mapped[list[float]] = mapped_column(JSON)
 
     if _USE_VECTOR:

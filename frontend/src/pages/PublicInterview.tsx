@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
-import { Send, CheckCircle, AlertCircle, Loader, Keyboard, Mic } from 'lucide-react';
+import { Send, CheckCircle, AlertCircle, Loader, Keyboard, Mic, Bot } from 'lucide-react';
 import type { InterviewEvaluation, InterviewQuestion, InterviewSessionResponse, PublicInterviewAnswerResponse } from '../types/api';
 import VoiceRecorder from '../components/VoiceRecorder';
 
@@ -183,6 +183,22 @@ export default function PublicInterview() {
           <p className="text-gray-500">{interview.job_title}</p>
           <p className="text-sm text-gray-400 mt-1">Candidate: {interview.candidate_name}</p>
         </div>
+
+        <a
+          href={`/interview/live/${session_id}`}
+          className="mb-4 flex items-center justify-between gap-3 bg-slate-900 text-white rounded-xl p-4 hover:bg-slate-800 transition-colors"
+        >
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-lg bg-blue-500/20 text-blue-300 flex items-center justify-center">
+              <Bot className="w-5 h-5" />
+            </div>
+            <div>
+              <p className="font-medium">Prefer live AI chat?</p>
+              <p className="text-sm text-slate-300">Open a real-time interview chat powered by the local Ollama model when available.</p>
+            </div>
+          </div>
+          <span className="text-sm text-blue-200">Open</span>
+        </a>
 
         <div className="bg-white rounded-xl shadow-sm border p-6">
           <div className="flex items-center justify-between mb-4">

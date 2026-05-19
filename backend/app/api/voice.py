@@ -48,6 +48,9 @@ class VoiceStatusResponse(BaseModel):
 
 
 def _validate_audio_size(audio_bytes: bytes) -> None:
+    """
+    Rejects audio uploads that exceed the configured size limit.
+    """
     if len(audio_bytes) > settings.max_audio_upload_bytes:
         max_mb = settings.max_audio_upload_bytes // (1024 * 1024)
         raise HTTPException(status_code=413, detail=f"Audio file is too large. Maximum size is {max_mb}MB.")
@@ -58,6 +61,9 @@ async def voice_start(
     session_id: str,
     _: User = Depends(require_any_role("owner", "admin", "recruiter", "candidate")),
 ) -> VoiceStartResponse:
+    """
+    Starts server-side state for a voice interview session.
+    """
     try:
         svc = get_voice_service()
         result = await svc.start_session(session_id)
@@ -72,6 +78,10 @@ async def voice_process(
     request: VoiceProcessRequest,
     _: User = Depends(require_any_role("owner", "admin", "recruiter", "candidate")),
 ) -> VoiceProcessResponse:
+    """
+    Processes base64 audio and returns transcript, evaluation, and optional audio
+    feedback.
+    """
     try:
         svc = get_voice_service()
         audio_bytes = base64.b64decode(request.audio, validate=True)
@@ -116,6 +126,10 @@ async def voice_process_upload(
     difficulty: str = Form("mid"),
     _: User = Depends(require_any_role("owner", "admin", "recruiter", "candidate")),
 ) -> VoiceProcessResponse:
+    """
+    Processes uploaded audio and returns transcript, evaluation, and optional audio
+    feedback.
+    """
     try:
         svc = get_voice_service()
         audio_bytes = await file.read()
@@ -153,6 +167,9 @@ async def voice_status(
     session_id: str,
     _: User = Depends(require_any_role("owner", "admin", "recruiter", "candidate")),
 ) -> VoiceStatusResponse:
+    """
+    Returns the status of a voice interview session.
+    """
     try:
         svc = get_voice_service()
         result = await svc.get_session_status(session_id)

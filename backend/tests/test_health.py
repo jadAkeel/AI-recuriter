@@ -4,6 +4,9 @@ from app.main import create_app
 
 
 def test_health() -> None:
+    """
+    Checks that health.
+    """
     app = create_app()
     client = TestClient(app)
     response = client.get("/api/v1/health")

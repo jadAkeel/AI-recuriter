@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 import inspect
 import json
 import logging
@@ -12,6 +13,7 @@ from app.core.db import SessionLocal
 from app.core.redis import get_redis
 from app.models.interview import InterviewSession as InterviewSessionModel
 from app.services.auth import decode_token, get_user_by_id
+from app.services.interview_analysis import analyze_completed_interview
 from app.services.voice_service import get_voice_service
 
 logger = logging.getLogger(__name__)
@@ -23,6 +25,9 @@ _webrtc_sessions: dict[str, dict[str, object]] = {}
 
 
 async def _authenticate_websocket(websocket: WebSocket) -> bool:
+    """
+    Authenticates a websocket connection using a bearer token.
+    """
     token = websocket.query_params.get("token")
     if not token:
         auth_header = websocket.headers.get("authorization", "")
@@ -45,6 +50,9 @@ async def _authenticate_websocket(websocket: WebSocket) -> bool:
 
 @router.websocket("/ws/cv-notifications")
 async def cv_notifications(websocket: WebSocket):
+    """
+    Streams CV processing task updates over websocket.
+    """
     await websocket.accept()
     if not await _authenticate_websocket(websocket):
         return
@@ -89,6 +97,9 @@ async def cv_notifications(websocket: WebSocket):
 
 @router.websocket("/ws/interview/{session_id}")
 async def interview_chat(websocket: WebSocket, session_id: str):
+    """
+    Handles live interview chat messages over websocket.
+    """
     await websocket.accept()
     _webrtc_sessions[session_id] = {"ws": websocket}
     logger.info("Interview WebSocket connected", extra={"session_id": session_id})
@@ -132,7 +143,6 @@ async def interview_chat(websocket: WebSocket, session_id: str):
                 "category": q.get("category", "technical"),
                 "question_number": answers_count + 1,
                 "total": total,
-                "hint": q.get("expected_answer_hint", ""),
             })
 
         try:
@@ -165,28 +175,68 @@ async def interview_chat(websocket: WebSocket, session_id: str):
                 if msg_type == "voice_answer":
                     audio_b64 = data.get("audio", "")
                     q_id = data.get("question_id", "")
-                    q_text = data.get("question_text", "")
-                    skill = data.get("skill", "general")
 
                     try:
                         audio_bytes = base64.b64decode(audio_b64, validate=True)
-                        result = await voice_svc.process_audio(
-                            audio_data=audio_bytes,
-                            session_id=session_id,
-                            question_id=q_id,
-                            question_text=q_text,
-                            skill=skill,
+                        transcript = await voice_svc.transcribe_audio(audio_bytes)
+                        if not transcript.strip():
+                            await websocket.send_json({"type": "error", "message": "Could not transcribe an answer"})
+                            continue
+
+                        q_idx = next((i for i, q in enumerate(questions) if q["id"] == q_id), -1)
+                        if q_idx < 0 or q_idx != answers_count:
+                            await websocket.send_json({
+                                "type": "error",
+                                "message": f"Expected question #{answers_count + 1}, got #{q_idx + 1}",
+                            })
+                            continue
+
+                        from app.services.enhanced_interview import get_enhanced_interview_service
+                        svc = get_enhanced_interview_service()
+                        result = await svc.submit_answer(
+                            db_session, session_id, q_id, transcript, use_llm=False,
                         )
-                        resp = {
+
+                        await db_session.refresh(interview)
+
+                        await websocket.send_json({
                             "type": "voice_evaluation",
-                            "transcript": result["transcript"],
+                            "question_id": q_id,
+                            "transcript": transcript,
                             "score": result["score"],
                             "feedback": result["feedback"],
                             "language_detected": result.get("language_detected", "english"),
-                        }
-                        if result.get("audio"):
-                            resp["audio"] = base64.b64encode(result["audio"]).decode("utf-8")
-                        await websocket.send_json(resp)
+                            "strengths": result.get("strengths", []),
+                            "weaknesses": result.get("weaknesses", []),
+                            "using_llm": result.get("using_llm", False),
+                        })
+
+                        answers_count += 1
+
+                        if answers_count >= total:
+                            scores = [e["score"] for e in (interview.evaluations or [])]
+                            avg = round(sum(scores) / len(scores), 4) if scores else 0
+                            await websocket.send_json({
+                                "type": "complete",
+                                "session_id": session_id,
+                                "average_score": avg,
+                                "total_questions": total,
+                                "answered": answers_count,
+                            })
+                            asyncio.create_task(analyze_completed_interview(session_id))
+                            break
+
+                        q = questions[answers_count]
+                        await websocket.send_json({
+                            "type": "question",
+                            "question_id": q["id"],
+                            "skill": q.get("skill", "general"),
+                            "question": q["question"],
+                            "difficulty": q.get("difficulty", "mid"),
+                            "category": q.get("category", "technical"),
+                            "question_number": answers_count + 1,
+                            "total": total,
+                        })
                     except Exception:
                         logger.exception("Voice answer processing failed")
                         await websocket.send_json({"type": "error", "message": "Voice processing failed"})
@@ -217,12 +267,14 @@ async def interview_chat(websocket: WebSocket, session_id: str):
                 svc = get_enhanced_interview_service()
                 try:
                     result = await svc.submit_answer(
-                        db_session, session_id, question_id, answer_text,
+                        db_session, session_id, question_id, answer_text, use_llm=False,
                     )
                 except Exception:
                     logger.exception("Answer evaluation failed")
                     await websocket.send_json({"type": "error", "message": "Evaluation failed"})
                     continue
+
+                await db_session.refresh(interview)
 
                 await websocket.send_json({
                     "type": "evaluation",
@@ -232,12 +284,12 @@ async def interview_chat(websocket: WebSocket, session_id: str):
                     "strengths": result.get("strengths", []),
                     "weaknesses": result.get("weaknesses", []),
                     "language_detected": result.get("language_detected", "english"),
+                    "using_llm": result.get("using_llm", False),
                 })
 
                 answers_count += 1
 
                 if answers_count >= total:
-                    # Interview complete
                     scores = [e["score"] for e in (interview.evaluations or [])]
                     avg = round(sum(scores) / len(scores), 4) if scores else 0
                     await websocket.send_json({
@@ -247,6 +299,7 @@ async def interview_chat(websocket: WebSocket, session_id: str):
                         "total_questions": total,
                         "answered": answers_count,
                     })
+                    asyncio.create_task(analyze_completed_interview(session_id))
                     break
 
                 # Send next question
@@ -260,7 +313,6 @@ async def interview_chat(websocket: WebSocket, session_id: str):
                     "category": q.get("category", "technical"),
                     "question_number": answers_count + 1,
                     "total": total,
-                    "hint": q.get("expected_answer_hint", ""),
                 })
 
         except WebSocketDisconnect:

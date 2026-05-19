@@ -6,16 +6,215 @@ from fastapi.testclient import TestClient
 from app.core.db import SessionLocal, init_db
 from app.main import create_app
 from app.models.candidate import Candidate
+from app.models.embedding import Embedding
 from app.models.job import Job
+from app.models.match_result import MatchResult
 from app.models.user import User
+from app.api.matching import _filter_candidates
 from app.services.auth import hash_password
 from app.services.embedding import HashEmbeddingService
+from app.services.hybrid_matcher import HybridMatchingEngine
 from app.services.matching import rank_candidates
+from app.services.skill_catalog import normalize_skill_name
 from app.services.vector_store import VectorStore
+
+
+def test_skill_normalization_handles_common_problem_solving_typo() -> None:
+    """
+    Checks that skill normalization handles common problem solving typo.
+    """
+    assert normalize_skill_name("porble solving") == "problem solving"
+
+
+@pytest.mark.asyncio
+async def test_junior_project_evidence_supplies_capped_semantic_bonus() -> None:
+    """
+    Checks that junior project evidence supplies capped semantic bonus.
+    """
+    job = Job(
+        id=str(uuid.uuid4()),
+        title="Junior Next.js Developer",
+        description="Junior developer building React and Next.js apps.",
+        required_skills=["next.js", "react"],
+        optional_skills=["postgresql"],
+        seniority="junior",
+    )
+    candidate = Candidate(
+        id=str(uuid.uuid4()),
+        full_name="Project Candidate",
+        email="project@example.com",
+        phone=None,
+        skills=[],
+        experience=[],
+        education=[],
+        projects=["GitHub portfolio: built a Next.js React dashboard with PostgreSQL data."],
+        total_years_experience=None,
+        raw_text="",
+    )
+
+    result = await HybridMatchingEngine()._compute_match(job, candidate, semantic_score=0.0)
+
+    assert result is not None
+    assert result.semantic_score == pytest.approx(0.50)
+    assert result.reasoning.score_breakdown["project_semantic_bonus"] == pytest.approx(0.50)
+    assert result.reasoning.score_breakdown["raw_semantic"] == 0.0
+    assert "Relevant project evidence for junior role" in result.reasoning.strengths
+
+
+@pytest.mark.asyncio
+async def test_project_semantic_bonus_requires_relevant_project_evidence() -> None:
+    """
+    Checks that project semantic bonus requires relevant project evidence.
+    """
+    job = Job(
+        id=str(uuid.uuid4()),
+        title="Junior Next.js Developer",
+        description="Junior developer building React and Next.js apps.",
+        required_skills=["next.js", "react"],
+        optional_skills=["postgresql"],
+        seniority="junior",
+    )
+    candidate = Candidate(
+        id=str(uuid.uuid4()),
+        full_name="Unrelated Project Candidate",
+        email="unrelated-project@example.com",
+        phone=None,
+        skills=[],
+        experience=[],
+        education=[],
+        projects=["GitHub portfolio: a marketing copywriting website and photography gallery."],
+        total_years_experience=None,
+        raw_text="",
+    )
+
+    result = await HybridMatchingEngine()._compute_match(job, candidate, semantic_score=0.0)
+
+    assert result is not None
+    assert result.semantic_score == 0.0
+    assert "project_semantic_bonus" not in result.reasoning.score_breakdown
+
+
+@pytest.mark.asyncio
+async def test_project_semantic_bonus_uses_raw_project_section_when_projects_only_store_titles() -> None:
+    """
+    Checks that project semantic bonus uses raw project section when projects only store
+    titles.
+    """
+    job = Job(
+        id=str(uuid.uuid4()),
+        title="Junior Next.js Developer",
+        description="Junior developer building React and Next.js apps.",
+        required_skills=["next.js", "react"],
+        optional_skills=["postgresql"],
+        seniority="junior",
+    )
+    candidate = Candidate(
+        id=str(uuid.uuid4()),
+        full_name="Raw Project Candidate",
+        email="raw-project@example.com",
+        phone=None,
+        skills=[],
+        experience=[],
+        education=[],
+        projects=["[1] Developer Experience Portal"],
+        total_years_experience=None,
+        raw_text=(
+            "PROJECTS\n"
+            "[1] Developer Experience Portal\n"
+            "Technologies: Go, PostgreSQL, GraphQL, React, Docker\n"
+            "Built an internal portal for engineers.\n"
+            "TECHNICAL SKILLS\n"
+            "Frontend: Next.js\n"
+        ),
+    )
+
+    result = await HybridMatchingEngine()._compute_match(job, candidate, semantic_score=0.0)
+
+    assert result is not None
+    assert result.semantic_score == pytest.approx(0.50)
+    assert result.reasoning.score_breakdown["project_semantic_bonus"] == pytest.approx(0.50)
+
+
+@pytest.mark.asyncio
+async def test_project_semantic_bonus_uses_project_context_when_pdf_text_order_is_split() -> None:
+    """
+    Checks that project semantic bonus uses project context when PDF text order is
+    split.
+    """
+    job = Job(
+        id=str(uuid.uuid4()),
+        title="AI Engineer",
+        description="Junior AI engineer with PyTorch and deep learning.",
+        required_skills=["python", "pytorch", "deep learning"],
+        optional_skills=[],
+        seniority="junior",
+    )
+    candidate = Candidate(
+        id=str(uuid.uuid4()),
+        full_name="Split Project Candidate",
+        email="split-project@example.com",
+        phone=None,
+        skills=["python", "pytorch"],
+        experience=[],
+        education=[],
+        projects=[],
+        total_years_experience=None,
+        raw_text=(
+            "PROJ PROJECT EXPERIENCE\n"
+            "Machine Learning Project - Heart Disease Prediction\n"
+            "Built a decision tree model.\n"
+            "PROFESSIONAL SUMMARY\n"
+            "Computer Science graduate.\n"
+            "Chess Hybrid AI Platform (Full-Stack Project)\n"
+            "Built a PyTorch-based policy and value neural network for deep learning move prediction.\n"
+        ),
+    )
+
+    result = await HybridMatchingEngine()._compute_match(job, candidate, semantic_score=0.0)
+
+    assert result is not None
+    assert result.semantic_score == pytest.approx(0.50)
+    assert result.reasoning.score_breakdown["project_semantic_bonus"] == pytest.approx(0.50)
+
+
+@pytest.mark.asyncio
+async def test_project_semantic_bonus_is_junior_only() -> None:
+    """
+    Checks that project semantic bonus is junior only.
+    """
+    job = Job(
+        id=str(uuid.uuid4()),
+        title="Mid Next.js Developer",
+        description="Mid developer building React and Next.js apps.",
+        required_skills=["next.js", "react"],
+        optional_skills=["postgresql"],
+        seniority="mid",
+    )
+    candidate = Candidate(
+        id=str(uuid.uuid4()),
+        full_name="Project Candidate",
+        email="project-mid@example.com",
+        phone=None,
+        skills=[],
+        experience=[],
+        education=[],
+        projects=["GitHub portfolio: built a Next.js React dashboard with PostgreSQL data."],
+        total_years_experience=None,
+        raw_text="",
+    )
+
+    result = await HybridMatchingEngine()._compute_match(job, candidate, semantic_score=0.0)
+
+    assert result is not None
+    assert result.semantic_score == 0.0
+    assert "project_semantic_bonus" not in result.reasoning.score_breakdown
 
 
 @pytest.mark.asyncio
 async def test_rank_candidates_returns_results() -> None:
+    """
+    Checks that rank candidates returns results.
+    """
     await init_db()
     embedder = HashEmbeddingService()
 
@@ -52,7 +251,14 @@ async def test_rank_candidates_returns_results() -> None:
 
         job_result = await embedder.embed([job.description])
         job_embedding = job_result[0]
-        results = await rank_candidates(session, job, job_embedding, top_k=5)
+        results = await rank_candidates(
+            session,
+            job,
+            job_embedding,
+            top_k=5,
+            candidates=[candidate],
+            cross_encoder_top_k=0,
+        )
 
     assert results
     assert results[0].candidate_id == candidate_id
@@ -60,6 +266,9 @@ async def test_rank_candidates_returns_results() -> None:
 
 @pytest.mark.asyncio
 async def test_python_job_ranks_python_candidate_above_java_candidate() -> None:
+    """
+    Checks that python job ranks python candidate above java candidate.
+    """
     await init_db()
     async with SessionLocal() as session:
         job = Job(
@@ -112,10 +321,278 @@ async def test_python_job_ranks_python_candidate_above_java_candidate() -> None:
     assert results[1].reasoning["required_score"] == 0.0
 
 
+@pytest.mark.asyncio
+async def test_matching_uses_detailed_and_raw_cv_skill_evidence() -> None:
+    """
+    Checks that matching uses detailed and raw CV skill evidence.
+    """
+    await init_db()
+    async with SessionLocal() as session:
+        job = Job(
+            id=str(uuid.uuid4()),
+            title="AI Engineer",
+            description="AI engineer with Python, SQL, deep learning, AWS certification, and vector database experience.",
+            required_skills=["python", "sql", "deep learning", "aws certificate", "vector database"],
+            optional_skills=["pytorch"],
+            seniority="mid",
+        )
+        candidate = Candidate(
+            id=str(uuid.uuid4()),
+            full_name="AI Candidate",
+            email="ai-candidate@example.com",
+            phone="+15550000004",
+            skills=["aws", "pytorch", "vector database"],
+            skills_detailed=[
+                {
+                    "name": "python",
+                    "status": "learning",
+                    "context": "Python (AI/ML/Deep Learning)",
+                },
+                {
+                    "name": "deep learning",
+                    "status": "learning",
+                    "context": "Python (AI/ML/Deep Learning)",
+                },
+                {
+                    "name": "aws",
+                    "status": "has_experience",
+                    "context": "AWS Cloud Practitioner Certified (CLF-C02)",
+                },
+            ],
+            experience=["Built a FastAPI backend with SQLAlchemy ORM."],
+            education=["Specialized in Python programming and Machine Learning."],
+            projects=["Deep learning training pipeline with a vector database."],
+            raw_text="Python AI/ML Deep Learning. AWS Cloud Practitioner Certified. SQLAlchemy ORM. Vector database. PyTorch.",
+        )
+        session.add_all([job, candidate])
+        await session.commit()
+
+        results = await rank_candidates(
+            session,
+            job,
+            [0.0] * 384,
+            top_k=1,
+            candidates=[candidate],
+            cross_encoder_top_k=0,
+            use_hybrid=True,
+        )
+
+    assert results
+    reasoning = results[0].reasoning
+    assert reasoning["required_score"] >= 0.8
+    assert set(reasoning["missing_required"]) == set()
+    assert {skill.lower() for skill in reasoning["matched_required"]} == {
+        "python",
+        "sql",
+        "deep learning",
+        "aws certificate",
+        "vector database",
+    }
+
+
+@pytest.mark.asyncio
+async def test_matching_does_not_count_active_learning_as_skill_evidence() -> None:
+    """
+    Checks that matching does not count active learning as skill evidence.
+    """
+    await init_db()
+    async with SessionLocal() as session:
+        job = Job(
+            id=str(uuid.uuid4()),
+            title="Platform Engineer",
+            description="Platform engineer with Docker experience.",
+            required_skills=["docker"],
+            optional_skills=[],
+            seniority="mid",
+        )
+        candidate = Candidate(
+            id=str(uuid.uuid4()),
+            full_name="Learning Candidate",
+            email=f"learning-{uuid.uuid4().hex[:8]}@example.com",
+            phone="+15550000005",
+            skills=[],
+            skills_detailed=[{
+                "name": "docker",
+                "status": "learning",
+                "context": "I want to learn Docker next.",
+            }],
+            learning_skills=["docker"],
+            experience=["Python backend engineer"],
+            education=["BSc"],
+            projects=["FastAPI service"],
+            total_years_experience=4,
+            raw_text="Python backend engineer. I want to learn Docker next.",
+        )
+        session.add_all([job, candidate])
+        await session.commit()
+
+        results = await rank_candidates(
+            session,
+            job,
+            [0.0] * 384,
+            top_k=1,
+            candidates=[candidate],
+            cross_encoder_top_k=0,
+            use_hybrid=True,
+        )
+
+    assert results
+    reasoning = results[0].reasoning
+    assert reasoning["required_score"] == 0.0
+    assert reasoning["matched_required"] == []
+    assert reasoning["missing_required"] == ["docker"]
+
+
+@pytest.mark.asyncio
+async def test_skill_filter_uses_exact_normalized_skill_names() -> None:
+    """
+    Checks that skill filter uses exact normalized skill names.
+    """
+    await init_db()
+    async with SessionLocal() as session:
+        cpp_candidate = Candidate(
+            id=str(uuid.uuid4()),
+            full_name="Cpp Candidate",
+            email=f"cpp-{uuid.uuid4().hex[:8]}@example.com",
+            phone="+15550000006",
+            skills=["c++"],
+            experience=[],
+            education=[],
+            projects=[],
+            raw_text="C++ developer.",
+        )
+        c_candidate = Candidate(
+            id=str(uuid.uuid4()),
+            full_name="C Candidate",
+            email=f"c-{uuid.uuid4().hex[:8]}@example.com",
+            phone="+15550000007",
+            skills=["c"],
+            experience=[],
+            education=[],
+            projects=[],
+            raw_text="C developer.",
+        )
+        session.add_all([cpp_candidate, c_candidate])
+        await session.commit()
+
+        filtered = await _filter_candidates(session, skills="c", skill_logic="and")
+
+    assert [candidate.id for candidate in filtered] == [c_candidate.id]
+
+
+@pytest.mark.asyncio
+async def test_filtered_match_run_preserves_existing_match_rows() -> None:
+    """
+    Checks that filtered match run preserves existing match rows.
+    """
+    from sqlalchemy import select
+
+    await init_db()
+    async with SessionLocal() as session:
+        job = Job(
+            id=str(uuid.uuid4()),
+            title="Backend Engineer",
+            description="Backend engineer with Python and SQL.",
+            required_skills=["python"],
+            optional_skills=["sql"],
+            seniority="mid",
+        )
+        kept = Candidate(
+            id=str(uuid.uuid4()),
+            full_name="Kept Candidate",
+            email=f"kept-{uuid.uuid4().hex[:8]}@example.com",
+            phone="+1",
+            skills=["python"],
+            experience=["Backend"],
+            education=["BSc"],
+            projects=[],
+            raw_text="Python backend engineer.",
+        )
+        untouched = Candidate(
+            id=str(uuid.uuid4()),
+            full_name="Untouched Candidate",
+            email=f"untouched-{uuid.uuid4().hex[:8]}@example.com",
+            phone="+2",
+            skills=["python", "sql"],
+            experience=["Backend"],
+            education=["BSc"],
+            projects=[],
+            raw_text="Python SQL backend engineer.",
+        )
+        session.add_all([job, kept, untouched])
+        await session.commit()
+
+        await rank_candidates(
+            session,
+            job,
+            [0.0] * 384,
+            top_k=2,
+            candidates=[kept, untouched],
+            cross_encoder_top_k=0,
+            use_hybrid=True,
+        )
+        await rank_candidates(
+            session,
+            job,
+            [0.0] * 384,
+            top_k=1,
+            candidates=[kept],
+            cross_encoder_top_k=0,
+            use_hybrid=True,
+        )
+
+        result = await session.execute(select(MatchResult).where(MatchResult.job_id == job.id))
+        candidate_ids = {match.candidate_id for match in result.scalars().all()}
+
+    assert kept.id in candidate_ids
+    assert untouched.id in candidate_ids
+
+
+@pytest.mark.asyncio
+async def test_cached_candidate_embedding_requires_matching_source_metadata() -> None:
+    """
+    Checks that cached candidate embedding requires matching source metadata.
+    """
+    await init_db()
+    async with SessionLocal() as session:
+        candidate = Candidate(
+            id=str(uuid.uuid4()),
+            full_name="Stale Vector Candidate",
+            email=f"stale-vector-{uuid.uuid4().hex[:8]}@example.com",
+            phone="+1",
+            skills=["python"],
+            experience=["Backend"],
+            education=["BSc"],
+            projects=[],
+            raw_text="Python backend engineer.",
+        )
+        session.add(candidate)
+        session.add(Embedding(
+            entity_type="candidate",
+            entity_id=candidate.id,
+            provider="hash",
+            model_name="hash",
+            source_hash="not-the-current-source",
+            embedding_json=[1.0] + [0.0] * 383,
+            embedding_vector=[1.0] + [0.0] * 383,
+        ))
+        await session.commit()
+
+        cached = await HybridMatchingEngine()._get_cached_embedding(VectorStore(session), candidate)
+
+    assert cached is None
+
+
 def test_matching_api_returns_candidate_details() -> None:
+    """
+    Checks that matching API returns candidate details.
+    """
     import asyncio
 
-    async def _seed() -> tuple[str, dict[str, str]]:
+    async def _seed() -> tuple[str, str, dict[str, str]]:
+        """
+        Seeds database rows used by the surrounding test.
+        """
         await init_db()
         async with SessionLocal() as session:
             user = User(
@@ -147,23 +624,158 @@ def test_matching_api_returns_candidate_details() -> None:
             )
             session.add_all([user, job, candidate])
             await session.commit()
-            return job.id, {"email": user.email, "password": "password123"}
+            return job.id, candidate.id, {"email": user.email, "password": "password123"}
 
-    job_id, credentials = asyncio.run(_seed())
+    job_id, candidate_id, credentials = asyncio.run(_seed())
     app = create_app()
     with TestClient(app) as client:
         login = client.post("/api/v1/auth/login", json=credentials)
         token = login.json()["access_token"]
         response = client.post(
             f"/api/v1/jobs/{job_id}/match",
-            params={"cross_encoder_top_k": 0},
+            params={"cross_encoder_top_k": 0, "top_k": 100},
             headers={"Authorization": f"Bearer {token}"},
         )
 
     assert response.status_code == 200, response.text
-    first = response.json()["results"][0]
-    assert first["candidate_name"] == "Visible Candidate"
-    assert first["candidate_email"] == "visible@example.com"
-    assert "python" in first["candidate_skills"]
-    assert first["reasoning"]["scoring_formula"]
-    assert first["reasoning"]["score_contributions"]
+    results = response.json()["results"]
+    visible = next(item for item in results if item["candidate_id"] == candidate_id)
+    assert visible["candidate_name"] == "Visible Candidate"
+    assert visible["candidate_email"] == "visible@example.com"
+    assert "python" in visible["candidate_skills"]
+    assert visible["reasoning"]["scoring_formula"]
+    assert visible["reasoning"]["score_contributions"]
+
+
+def test_saved_matches_api_returns_persisted_results() -> None:
+    """
+    Checks that saved matches API returns persisted results.
+    """
+    import asyncio
+
+    async def _seed() -> tuple[str, str, dict[str, str]]:
+        """
+        Seeds database rows used by the surrounding test.
+        """
+        await init_db()
+        async with SessionLocal() as session:
+            user = User(
+                id=str(uuid.uuid4()),
+                email=f"recruiter-saved-match-{uuid.uuid4().hex[:8]}@example.com",
+                password_hash=hash_password("password123"),
+                full_name="Recruiter Saved Match",
+                role="recruiter",
+            )
+            job = Job(
+                id=str(uuid.uuid4()),
+                title="Saved FastAPI Engineer",
+                description="FastAPI engineer with Python and PostgreSQL.",
+                required_skills=["python", "fastapi", "postgresql"],
+                optional_skills=["docker"],
+                seniority="mid",
+            )
+            candidate = Candidate(
+                id=str(uuid.uuid4()),
+                full_name="Saved Candidate",
+                email=f"saved-candidate-{uuid.uuid4().hex[:8]}@example.com",
+                phone="+15550000008",
+                skills=["python", "fastapi", "postgresql", "docker"],
+                experience=["Backend Engineer"],
+                education=["BSc"],
+                projects=["API"],
+                total_years_experience=4,
+                raw_text="Python FastAPI PostgreSQL Docker",
+            )
+            session.add_all([user, job, candidate])
+            await session.commit()
+            return job.id, candidate.id, {"email": user.email, "password": "password123"}
+
+    job_id, candidate_id, credentials = asyncio.run(_seed())
+    app = create_app()
+    with TestClient(app) as client:
+        login = client.post("/api/v1/auth/login", json=credentials)
+        token = login.json()["access_token"]
+        headers = {"Authorization": f"Bearer {token}"}
+
+        match_response = client.post(
+            f"/api/v1/jobs/{job_id}/match",
+            params={"cross_encoder_top_k": 0, "top_k": 100},
+            headers=headers,
+        )
+        saved_response = client.get(
+            f"/api/v1/jobs/{job_id}/matches",
+            headers=headers,
+        )
+
+    assert match_response.status_code == 200, match_response.text
+    assert saved_response.status_code == 200, saved_response.text
+    saved_results = saved_response.json()["results"]
+    saved = next(item for item in saved_results if item["candidate_id"] == candidate_id)
+    assert saved["candidate_name"] == "Saved Candidate"
+    assert saved["candidate_email"].startswith("saved-candidate-")
+    assert "python" in saved["candidate_skills"]
+
+
+def test_saved_matches_api_refreshes_stale_scores() -> None:
+    """
+    Checks that saved matches API refreshes stale scores.
+    """
+    import asyncio
+
+    async def _seed() -> tuple[str, str, dict[str, str]]:
+        """
+        Seeds database rows used by the surrounding test.
+        """
+        await init_db()
+        async with SessionLocal() as session:
+            user = User(
+                id=str(uuid.uuid4()),
+                email=f"recruiter-stale-match-{uuid.uuid4().hex[:8]}@example.com",
+                password_hash=hash_password("password123"),
+                full_name="Recruiter Stale Match",
+                role="recruiter",
+            )
+            job = Job(
+                id=str(uuid.uuid4()),
+                title="Stale Python Engineer",
+                description="Python engineer.",
+                required_skills=["python"],
+                optional_skills=[],
+                seniority="mid",
+            )
+            candidate = Candidate(
+                id=str(uuid.uuid4()),
+                full_name="Stale Score Candidate",
+                email=f"stale-score-{uuid.uuid4().hex[:8]}@example.com",
+                phone="+15550000009",
+                skills=["python"],
+                experience=["Built Python services."],
+                education=["BSc"],
+                projects=[],
+                raw_text="Python service experience.",
+            )
+            session.add_all([user, job, candidate])
+            session.add(MatchResult(
+                job_id=job.id,
+                candidate_id=candidate.id,
+                score=0.1,
+                reasoning={"scoring_model": "hybrid", "semantic_score": 0.0},
+            ))
+            await session.commit()
+            return job.id, candidate.id, {"email": user.email, "password": "password123"}
+
+    job_id, candidate_id, credentials = asyncio.run(_seed())
+    app = create_app()
+    with TestClient(app) as client:
+        login = client.post("/api/v1/auth/login", json=credentials)
+        token = login.json()["access_token"]
+        saved_response = client.get(
+            f"/api/v1/jobs/{job_id}/matches",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert saved_response.status_code == 200, saved_response.text
+    saved = next(item for item in saved_response.json()["results"] if item["candidate_id"] == candidate_id)
+    assert saved["score"] == 0.575
+    assert saved["reasoning"]["scoring_model"] == "hybrid_v2"
+    assert saved["reasoning"]["score_trace"]["refreshed_from_stale_match"] is True

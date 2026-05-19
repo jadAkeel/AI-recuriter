@@ -34,6 +34,9 @@ router = APIRouter()
 
 @router.post("/auth/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def register(request: RegisterRequest, session: AsyncSession = Depends(get_db_session)) -> UserResponse:
+    """
+    Registers a new user account.
+    """
     try:
         user = await register_user(session, request.email, request.password, request.full_name)
         return UserResponse(id=user.id, email=user.email, full_name=user.full_name, role=user.role)
@@ -43,6 +46,9 @@ async def register(request: RegisterRequest, session: AsyncSession = Depends(get
 
 @router.post("/auth/login", response_model=TokenResponse)
 async def login(request: LoginRequest, session: AsyncSession = Depends(get_db_session)) -> TokenResponse:
+    """
+    Authenticates a user and returns access and refresh tokens.
+    """
     user = await authenticate_user(session, request.email, request.password)
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
@@ -55,6 +61,9 @@ async def login(request: LoginRequest, session: AsyncSession = Depends(get_db_se
 
 @router.post("/auth/refresh", response_model=TokenResponse)
 async def refresh(request: RefreshRequest, session: AsyncSession = Depends(get_db_session)) -> TokenResponse:
+    """
+    Issues fresh tokens from a valid refresh token.
+    """
     payload = decode_token(request.refresh_token)
     if payload is None or payload.get("type") != "refresh":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
@@ -71,6 +80,9 @@ async def refresh(request: RefreshRequest, session: AsyncSession = Depends(get_d
 
 @router.get("/auth/me", response_model=UserResponse)
 async def me(user: User = Depends(get_current_user)) -> UserResponse:
+    """
+    Returns the currently authenticated user.
+    """
     return UserResponse(id=user.id, email=user.email, full_name=user.full_name, role=user.role)
 
 
@@ -79,6 +91,9 @@ async def users_list(
     _: User = Depends(require_any_role("owner", "admin")),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[UserResponse]:
+    """
+    Lists users for administrators.
+    """
     users = await list_users(session)
     return [UserResponse(id=u.id, email=u.email, full_name=u.full_name, role=u.role) for u in users]
 
@@ -90,6 +105,9 @@ async def change_user_role(
     current_user: User = Depends(require_any_role("owner", "admin")),
     session: AsyncSession = Depends(get_db_session),
 ) -> UserResponse:
+    """
+    Updates a user role with owner-role protections.
+    """
     if request.role.lower() == "owner" and current_user.role.lower() != "owner":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only owner can assign owner role")
 

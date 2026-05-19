@@ -16,6 +16,9 @@ class QuestionItem(BaseModel):
     @field_validator("difficulty")
     @classmethod
     def _normalize_difficulty(cls, value: str) -> str:
+        """
+        Normalizes question difficulty to a supported value.
+        """
         difficulty = str(value or "mid").strip().lower()
         return difficulty if difficulty in {"junior", "mid", "senior", "medium"} else "mid"
 
@@ -50,6 +53,9 @@ class AnswerResponse(BaseModel):
     @field_validator("score", mode="before")
     @classmethod
     def _clamp_score(cls, value: float) -> float:
+        """
+        Clamps an interview score to the supported range.
+        """
         try:
             return max(0.0, min(1.0, float(value)))
         except (TypeError, ValueError):
@@ -100,6 +106,9 @@ class InterviewScoreBreakdown(BaseModel):
     @field_validator("technical", "problem_solving", "behavioral", "communication", "overall", mode="before")
     @classmethod
     def _clamp_scores(cls, value: float) -> float:
+        """
+        Clamps all rubric score fields to the supported range.
+        """
         try:
             return max(0.0, min(1.0, float(value)))
         except (TypeError, ValueError):
