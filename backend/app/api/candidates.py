@@ -20,12 +20,14 @@ from app.models.embedding import Embedding
 from app.models.interview import InterviewSession
 from app.models.match_result import MatchResult
 from app.models.report import Report
+from app.models.report_version import ReportVersion
+from app.models.skill_evidence import SkillEvidence
+from app.models.skill_feedback import SkillFeedback
 from app.models.user import User
 from app.schemas.candidate import CandidateRecord
-from app.services.candidate_text import build_candidate_embedding_text_from_profile
+from app.services.candidate_text import upsert_candidate_embedding
 from app.services.cv_parser import extract_text
 from app.services.enhanced_cv_parser import get_enhanced_cv_parser
-from app.services.embedding import embedding_metadata_for_text, get_embedding_service
 from app.services.esco_extractor import get_esco_extractor
 from app.services.skill_catalog import (
     SKILL_KEYWORDS,
@@ -34,8 +36,8 @@ from app.services.skill_catalog import (
     normalize_text_for_skill_matching,
     skill_in_text,
 )
+from app.services.skill_evidence import replace_candidate_skill_evidence
 from app.services.task_queue import enqueue_cv_processing
-from app.services.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +167,7 @@ def _apply_profile_to_candidate(candidate: Candidate, profile) -> None:
     candidate.projects = profile.projects
     candidate.negative_skills = profile.negative_skills or None
     candidate.learning_skills = profile.learning_skills or None
+    candidate.uncatalogued_skills = profile.uncatalogued_skills or None
     candidate.total_years_experience = profile.total_years_experience
     candidate.raw_text = profile.raw_text
 
@@ -179,8 +182,7 @@ def _candidate_display_skills(candidate: Candidate) -> list[str]:
             continue
         status = str(detail.get("status", "")).lower().strip()
         name = str(detail.get("name", "")).strip()
-        context = str(detail.get("context", "") or "").strip()
-        if name and status not in {"no_experience", "learning"} and context:
+        if name and status != "no_experience":
             skills.append(name)
 
     result: list[str] = []
@@ -197,16 +199,7 @@ async def _upsert_candidate_embedding(session: AsyncSession, candidate_id: str, 
     """
     Creates or updates the embedding stored for a candidate profile.
     """
-    embedding_text = build_candidate_embedding_text_from_profile(profile)
-    embedder = get_embedding_service()
-    embedding = (await embedder.embed([embedding_text]))[0]
-    store = VectorStore(session)
-    await store.upsert_embedding(
-        "candidate",
-        candidate_id,
-        embedding,
-        metadata=embedding_metadata_for_text(embedding_text),
-    )
+    await upsert_candidate_embedding(session, candidate_id, profile)
 
 
 async def _create_candidate_from_content(
@@ -273,6 +266,7 @@ async def _create_candidate_from_content(
         await session.commit()
         _delete_cv_files(existing_candidate.id)
         _save_cv_file(existing_candidate.id, filename, content)
+        await replace_candidate_skill_evidence(session, existing_candidate, commit=True)
         try:
             await _upsert_candidate_embedding(session, existing_candidate.id, profile)
         except Exception:
@@ -294,6 +288,7 @@ async def _create_candidate_from_content(
     await session.commit()
 
     _save_cv_file(candidate_id, filename, content)
+    await replace_candidate_skill_evidence(session, candidate, commit=True)
 
     try:
         await _upsert_candidate_embedding(session, candidate_id, profile)
@@ -432,6 +427,14 @@ async def list_candidates(
         raise HTTPException(status_code=400, detail="skill_logic must be 'and' or 'or'")
     if sort_dir not in {"asc", "desc"}:
         raise HTTPException(status_code=400, detail="sort_dir must be 'asc' or 'desc'")
+    if min_skills is not None and min_skills < 0:
+        raise HTTPException(status_code=400, detail="min_skills must be >= 0")
+    if min_years is not None and min_years < 0:
+        raise HTTPException(status_code=400, detail="min_years must be >= 0")
+    if max_years is not None and max_years < 0:
+        raise HTTPException(status_code=400, detail="max_years must be >= 0")
+    if min_years is not None and max_years is not None and min_years > max_years:
+        raise HTTPException(status_code=400, detail="min_years cannot exceed max_years")
 
     stmt = select(Candidate)
     if search:
@@ -439,6 +442,16 @@ async def list_candidates(
         stmt = stmt.where(
             Candidate.full_name.ilike(f"%{search_lower}%")
             | Candidate.email.ilike(f"%{search_lower}%")
+        )
+    if min_years is not None:
+        stmt = stmt.where(
+            Candidate.total_years_experience.is_not(None),
+            Candidate.total_years_experience >= min_years,
+        )
+    if max_years is not None:
+        stmt = stmt.where(
+            Candidate.total_years_experience.is_not(None),
+            Candidate.total_years_experience <= max_years,
         )
     result = await session.execute(stmt)
     candidates = result.scalars().all()
@@ -461,17 +474,10 @@ async def list_candidates(
             experience_entries=candidate.experience_entries or [],
             negative_skills=candidate.negative_skills or [],
             learning_skills=candidate.learning_skills or [],
+            uncatalogued_skills=candidate.uncatalogued_skills or [],
         )
         for candidate in candidates
     ]
-
-    if search:
-        search_lower = search.lower()
-        records = [
-            r for r in records
-            if (r.full_name and search_lower in r.full_name.lower())
-            or (r.email and search_lower in r.email.lower())
-        ]
 
     if skills:
         skill_list = [normalize_skill_name(s) for s in skills.split(",") if s.strip()]
@@ -486,19 +492,8 @@ async def list_candidates(
                 if all(skill_lower in {normalize_skill_name(cs) for cs in r.skills} for skill_lower in skill_list)
             ]
 
-    if min_years is not None and min_years < 0:
-        raise HTTPException(status_code=400, detail="min_years must be >= 0")
-    if max_years is not None and max_years < 0:
-        raise HTTPException(status_code=400, detail="max_years must be >= 0")
-    if min_years is not None and max_years is not None and min_years > max_years:
-        raise HTTPException(status_code=400, detail="min_years cannot exceed max_years")
-
     if min_skills is not None:
         records = [r for r in records if len(r.skills) >= min_skills]
-    if min_years is not None:
-        records = [r for r in records if r.total_years_experience is not None and r.total_years_experience >= min_years]
-    if max_years is not None:
-        records = [r for r in records if r.total_years_experience is not None and r.total_years_experience <= max_years]
 
     if education_search:
         q = education_search.lower()
@@ -593,6 +588,7 @@ async def get_my_candidate_profile(
         projects=candidate.projects,
         negative_skills=candidate.negative_skills or [],
         learning_skills=candidate.learning_skills or [],
+        uncatalogued_skills=candidate.uncatalogued_skills or [],
         total_years_experience=candidate.total_years_experience,
         raw_text=candidate.raw_text,
     )
@@ -629,6 +625,7 @@ async def get_candidate(
         projects=candidate.projects,
         negative_skills=candidate.negative_skills or [],
         learning_skills=candidate.learning_skills or [],
+        uncatalogued_skills=candidate.uncatalogued_skills or [],
         total_years_experience=candidate.total_years_experience,
         raw_text=candidate.raw_text,
     )
@@ -691,6 +688,9 @@ async def delete_candidate(
         raise HTTPException(status_code=404, detail="Candidate not found")
 
     await session.execute(sa_delete(MatchResult).where(MatchResult.candidate_id == candidate_id))
+    await session.execute(sa_delete(SkillFeedback).where(SkillFeedback.candidate_id == candidate_id))
+    await session.execute(sa_delete(SkillEvidence).where(SkillEvidence.candidate_id == candidate_id))
+    await session.execute(sa_delete(ReportVersion).where(ReportVersion.candidate_id == candidate_id))
     await session.execute(sa_delete(Report).where(Report.candidate_id == candidate_id))
     await session.execute(sa_delete(InterviewSession).where(InterviewSession.candidate_id == candidate_id))
     await session.execute(
@@ -723,6 +723,9 @@ async def delete_all_candidates(
     candidate_ids = [c.id for c in candidates]
     if candidate_ids:
         await session.execute(sa_delete(MatchResult).where(MatchResult.candidate_id.in_(candidate_ids)))
+        await session.execute(sa_delete(SkillFeedback).where(SkillFeedback.candidate_id.in_(candidate_ids)))
+        await session.execute(sa_delete(SkillEvidence).where(SkillEvidence.candidate_id.in_(candidate_ids)))
+        await session.execute(sa_delete(ReportVersion).where(ReportVersion.candidate_id.in_(candidate_ids)))
         await session.execute(sa_delete(Report).where(Report.candidate_id.in_(candidate_ids)))
         await session.execute(sa_delete(InterviewSession).where(InterviewSession.candidate_id.in_(candidate_ids)))
     await session.execute(sa_delete(Embedding).where(Embedding.entity_type == "candidate"))

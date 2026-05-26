@@ -1,0 +1,4 @@
+{
+  "cv_engineer.txt": ["python", "fastapi", "postgresql", "docker", "redis", "rest api"],
+  "cv_marketing.txt": ["communication", "presentation", "project management", "stakeholder management"]
+}

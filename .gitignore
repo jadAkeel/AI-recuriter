@@ -39,3 +39,18 @@ backend/temp_audio/
 # OS
 .DS_Store
 Thumbs.db
+
+# Windows reserved names
+nul
+
+# Logs directory
+logs/
+
+# Generated reports
+audit_report.json
+
+# Patch files
+*.patch
+
+# Uploads
+uploads/

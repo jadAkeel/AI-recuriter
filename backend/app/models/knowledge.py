@@ -15,3 +15,5 @@ class KnowledgeDocument(Base):
     category: Mapped[str] = mapped_column(String(50), index=True)
     tags: Mapped[list[str]] = mapped_column(JSON)
     embedding: Mapped[list[float] | None] = mapped_column(JSON, nullable=True)
+    embedding_multilingual: Mapped[list[float] | None] = mapped_column(JSON, nullable=True)
+

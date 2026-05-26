@@ -4,16 +4,21 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.core.db import SessionLocal, init_db
+from app.api.candidates import _candidate_display_skills as candidate_api_display_skills
 from app.main import create_app
 from app.models.candidate import Candidate
 from app.models.embedding import Embedding
 from app.models.job import Job
 from app.models.match_result import MatchResult
 from app.models.user import User
-from app.api.matching import _filter_candidates
+from app.api.matching import _candidate_display_skills as matching_api_display_skills, _filter_candidates
 from app.services.auth import hash_password
 from app.services.embedding import HashEmbeddingService
-from app.services.hybrid_matcher import HybridMatchingEngine
+from app.services.hybrid_matcher import (
+    HybridMatchingEngine,
+    compute_seniority_score,
+    required_skill_score_cap_from_coverage,
+)
 from app.services.matching import rank_candidates
 from app.services.skill_catalog import normalize_skill_name
 from app.services.vector_store import VectorStore
@@ -24,6 +29,87 @@ def test_skill_normalization_handles_common_problem_solving_typo() -> None:
     Checks that skill normalization handles common problem solving typo.
     """
     assert normalize_skill_name("porble solving") == "problem solving"
+
+
+def test_required_skill_score_cap_uses_continuous_coverage() -> None:
+    """
+    Checks that required-skill coverage applies a smooth score cap.
+    """
+    assert required_skill_score_cap_from_coverage(0.0, True) == pytest.approx(0.30)
+    assert required_skill_score_cap_from_coverage(0.4, True) == pytest.approx(0.58)
+    assert required_skill_score_cap_from_coverage(1.0, True) == pytest.approx(1.0)
+    assert required_skill_score_cap_from_coverage(0.4, False) == pytest.approx(1.0)
+
+
+def test_seniority_overqualification_penalty_is_capped() -> None:
+    """
+    Checks that overqualified candidates keep a strong seniority score.
+    """
+    assert compute_seniority_score("junior", 20) == pytest.approx(0.85)
+
+
+def test_contextless_detailed_skills_are_visible_for_filtering() -> None:
+    """
+    Checks that detailed skills do not require context to be searchable.
+    """
+    candidate = Candidate(
+        id=str(uuid.uuid4()),
+        full_name="Contextless Candidate",
+        email="contextless@example.com",
+        phone=None,
+        skills=[],
+        skills_detailed=[
+            {"name": "Python", "status": "has_experience", "context": ""},
+            {"name": "Docker", "status": "learning", "context": ""},
+            {"name": "Scala", "status": "no_experience", "context": ""},
+        ],
+        experience=[],
+        education=[],
+        projects=[],
+        raw_text="",
+    )
+
+    for display_skills in (candidate_api_display_skills(candidate), matching_api_display_skills(candidate)):
+        assert "python" in display_skills
+        assert "docker" in display_skills
+        assert "scala" not in display_skills
+
+
+@pytest.mark.asyncio
+async def test_hybrid_matching_keeps_learning_and_contextless_detailed_skills() -> None:
+    """
+    Checks that matching uses learning and contextless detailed skills.
+    """
+    job = Job(
+        id=str(uuid.uuid4()),
+        title="Platform Engineer",
+        description="Needs Python and Docker.",
+        required_skills=["python", "docker"],
+        optional_skills=[],
+        seniority="mid",
+    )
+    candidate = Candidate(
+        id=str(uuid.uuid4()),
+        full_name="Learning Candidate",
+        email="learning-contextless@example.com",
+        phone=None,
+        skills=[],
+        skills_detailed=[
+            {"name": "Python", "status": "has_experience", "context": ""},
+            {"name": "Docker", "status": "learning", "context": ""},
+        ],
+        experience=[],
+        education=[],
+        projects=[],
+        learning_skills=["docker"],
+        raw_text="",
+    )
+
+    result = await HybridMatchingEngine()._compute_match(job, candidate, semantic_score=0.0)
+
+    assert result is not None
+    assert [match.skill for match in result.skill_match.matched_required] == ["python", "docker"]
+    assert result.skill_match.required_score == pytest.approx(0.70)
 
 
 @pytest.mark.asyncio
@@ -379,7 +465,7 @@ async def test_matching_uses_detailed_and_raw_cv_skill_evidence() -> None:
 
     assert results
     reasoning = results[0].reasoning
-    assert reasoning["required_score"] >= 0.8
+    assert reasoning["required_score"] == pytest.approx(0.72)
     assert set(reasoning["missing_required"]) == set()
     assert {skill.lower() for skill in reasoning["matched_required"]} == {
         "python",
@@ -391,9 +477,9 @@ async def test_matching_uses_detailed_and_raw_cv_skill_evidence() -> None:
 
 
 @pytest.mark.asyncio
-async def test_matching_does_not_count_active_learning_as_skill_evidence() -> None:
+async def test_matching_counts_active_learning_as_partial_skill_evidence() -> None:
     """
-    Checks that matching does not count active learning as skill evidence.
+    Checks that matching gives active learning skills partial credit.
     """
     await init_db()
     async with SessionLocal() as session:
@@ -438,9 +524,9 @@ async def test_matching_does_not_count_active_learning_as_skill_evidence() -> No
 
     assert results
     reasoning = results[0].reasoning
-    assert reasoning["required_score"] == 0.0
-    assert reasoning["matched_required"] == []
-    assert reasoning["missing_required"] == ["docker"]
+    assert reasoning["required_score"] == pytest.approx(0.60)
+    assert reasoning["matched_required"] == ["docker"]
+    assert reasoning["missing_required"] == []
 
 
 @pytest.mark.asyncio

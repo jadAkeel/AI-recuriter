@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.candidate import Candidate
 from app.models.job import Job
 from app.models.match_result import MatchResult
+from app.services.ai_metadata import current_ai_provider_metadata, scoring_version_from_reasoning
 from app.services.hybrid_matcher import (
     CROSS_ENCODER_SCORING_FORMULA,
     DEFAULT_WEIGHTS,
@@ -246,11 +247,17 @@ async def _rank_with_hybrid_engine(
                 candidate_id=hybrid_result.candidate_id,
                 score=hybrid_result.final_score,
                 reasoning=reasoning,
+                scoring_version=scoring_version_from_reasoning(reasoning),
+                provider_metadata=current_ai_provider_metadata(),
+                is_stale=False,
             )
             session.add(match)
         else:
             match.score = hybrid_result.final_score
             match.reasoning = reasoning
+            match.scoring_version = scoring_version_from_reasoning(reasoning)
+            match.provider_metadata = current_ai_provider_metadata()
+            match.is_stale = False
         results.append(match)
     
     await session.commit()
@@ -455,11 +462,22 @@ async def _rank_legacy(
         reasoning["rank"] = rank
         match = existing_by_candidate.get(cand.id)
         if match is None:
-            match = MatchResult(job_id=job.id, candidate_id=cand.id, score=final_score, reasoning=reasoning)
+            match = MatchResult(
+                job_id=job.id,
+                candidate_id=cand.id,
+                score=final_score,
+                reasoning=reasoning,
+                scoring_version=scoring_version_from_reasoning(reasoning),
+                provider_metadata=current_ai_provider_metadata(),
+                is_stale=False,
+            )
             session.add(match)
         else:
             match.score = final_score
             match.reasoning = reasoning
+            match.scoring_version = scoring_version_from_reasoning(reasoning)
+            match.provider_metadata = current_ai_provider_metadata()
+            match.is_stale = False
         results.append(match)
     await session.commit()
     sorted_results = sorted(results, key=lambda item: (-item.score, item.candidate_id))

@@ -1,0 +1,27 @@
+{
+  "categories": {
+    "AI/ML Tools": [
+      "semantic search",
+      "retrieval augmented generation",
+      "prompt evaluation",
+      "embedding search",
+      "reranking",
+      "guardrails",
+      "agentic workflows"
+    ],
+    "Databases": [
+      "pgvector",
+      "pinecone",
+      "qdrant",
+      "weaviate",
+      "milvus",
+      "duckdb"
+    ],
+    "DevOps Tools": [
+      "github workflows",
+      "docker swarm",
+      "kubernetes operators",
+      "platform engineering"
+    ]
+  }
+}

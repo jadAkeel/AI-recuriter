@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Iterable
 import pdfplumber
 from docx import Document
-
 from app.schemas.candidate import CandidateProfile
 from app.services.skill_catalog import extract_catalog_skills, normalize_text_for_skill_matching
 from app.services.stanza_nlp import ParsedText, parse_text_with_stanza

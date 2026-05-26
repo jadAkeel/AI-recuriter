@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { Mic, Square, AlertCircle } from 'lucide-react';
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
 
@@ -10,19 +10,25 @@ interface VoiceRecorderProps {
 
 export default function VoiceRecorder({ onRecordingComplete, disabled = false, maxDuration = 30 }: VoiceRecorderProps) {
   const { isRecording, isSupported, duration, audioBlob, startRecording, stopRecording, cancelRecording, error } = useVoiceRecorder();
+  const onCompleteRef = useRef(onRecordingComplete);
+  const deliveredBlobRef = useRef<Blob | null>(null);
 
   useEffect(() => {
-    if (duration >= maxDuration) {
-      const blob = stopRecording();
-      if (blob) onRecordingComplete(blob);
-    }
-  }, [duration, maxDuration, stopRecording, onRecordingComplete]);
+    onCompleteRef.current = onRecordingComplete;
+  }, [onRecordingComplete]);
 
   useEffect(() => {
-    if (audioBlob) {
-      onRecordingComplete(audioBlob);
+    if (isRecording && duration >= maxDuration) {
+      stopRecording();
     }
-  }, [audioBlob, onRecordingComplete]);
+  }, [duration, isRecording, maxDuration, stopRecording]);
+
+  useEffect(() => {
+    if (audioBlob && deliveredBlobRef.current !== audioBlob) {
+      deliveredBlobRef.current = audioBlob;
+      onCompleteRef.current(audioBlob);
+    }
+  }, [audioBlob]);
 
   if (!isSupported) {
     return (
@@ -47,8 +53,7 @@ export default function VoiceRecorder({ onRecordingComplete, disabled = false, m
           </div>
           <button
             onClick={() => {
-              const blob = stopRecording();
-              if (blob) onRecordingComplete(blob);
+              stopRecording();
             }}
             disabled={disabled}
             className="flex items-center gap-1 px-3 py-1.5 bg-red-500 text-white rounded-lg hover:bg-red-600 disabled:opacity-50 text-sm"

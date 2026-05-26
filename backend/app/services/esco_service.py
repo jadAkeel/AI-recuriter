@@ -17,6 +17,7 @@ from typing import Any
 
 from rapidfuzz import fuzz
 
+from app.core.config import settings
 from app.services.skill_catalog import SKILL_CATEGORIES
 
 logger = logging.getLogger(__name__)
@@ -109,12 +110,19 @@ class ESCOSkillService:
         self._skills_by_label: dict[str, NormalizedSkill] = {}
         self._skill_clusters: dict[str, SkillCluster] = {}
         self._loaded = False
+        self._real_esco_loaded = False
         
         if esco_data_path:
-            self.load_esco_data(esco_data_path)
+            if not self.load_esco_data(esco_data_path):
+                logger.warning("Real ESCO data unavailable; falling back to built-in skill catalog")
+                self._initialize_from_catalog()
         else:
-            # Initialize with built-in skill catalog as fallback
-            self._initialize_from_catalog()
+            configured_path = _resolve_data_path(settings.esco_data_path)
+            if configured_path.exists() and self.load_esco_data(configured_path):
+                self._real_esco_loaded = True
+            else:
+                logger.warning("Real ESCO data file not found; falling back to built-in skill catalog")
+                self._initialize_from_catalog()
     
     def load_esco_data(self, path: str | Path) -> int:
         """
@@ -135,6 +143,9 @@ class ESCOSkillService:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
             
+            self._skills_by_uri.clear()
+            self._skills_by_label.clear()
+            self._skill_clusters.clear()
             count = 0
             for skill_data in data.get("skills", []):
                 skill = self._parse_skill(skill_data)
@@ -149,6 +160,7 @@ class ESCOSkillService:
                     self._skill_clusters[cluster.cluster_id] = cluster
             
             self._loaded = True
+            self._real_esco_loaded = count > 0
             logger.info(f"Loaded {count} ESCO skills from {path}")
             return count
             
@@ -164,12 +176,20 @@ class ESCOSkillService:
                 return None
             
             labels = data.get("preferredLabel", {})
-            preferred = labels.get("en", "") or labels.get("ar", "")
+            if isinstance(labels, str):
+                preferred = labels
+            else:
+                preferred = labels.get("en", "") or labels.get("ar", "")
             if not preferred:
                 return None
             
             alt_labels_data = data.get("altLabels", {})
-            alt_labels = alt_labels_data.get("en", []) + alt_labels_data.get("ar", [])
+            if isinstance(alt_labels_data, list):
+                alt_labels = [str(item) for item in alt_labels_data]
+            elif isinstance(alt_labels_data, str):
+                alt_labels = [alt_labels_data]
+            else:
+                alt_labels = alt_labels_data.get("en", []) + alt_labels_data.get("ar", [])
             
             return NormalizedSkill(
                 esco_uri=uri,
@@ -238,6 +258,10 @@ class ESCOSkillService:
         
         self._loaded = True
         logger.info(f"Initialized with {len(self._skills_by_uri)} skills from built-in catalog")
+
+    def is_real_esco_loaded(self) -> bool:
+        """Returns whether the service loaded real ESCO data instead of local fallback data."""
+        return self._real_esco_loaded
     
     def normalize_skill(self, skill: str) -> NormalizedSkill | None:
         """
@@ -520,3 +544,10 @@ def reset_esco_service() -> None:
     """Reset the ESCO service singleton (for testing)."""
     global _esco_service
     _esco_service = None
+
+
+def _resolve_data_path(path_value: str | Path) -> Path:
+    path = Path(path_value)
+    if path.is_absolute() or path.exists():
+        return path
+    return Path(__file__).resolve().parents[3] / path

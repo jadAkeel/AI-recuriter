@@ -6,6 +6,7 @@ import logging
 import uuid
 from typing import Any, Awaitable, Callable
 
+from app.core.config import settings
 from app.core.redis import get_redis
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,8 @@ async def enqueue_cv_processing(
     if r:
         await r.lpush(TASK_QUEUE_KEY, json.dumps(task))
     else:
+        if settings.is_production:
+            raise RuntimeError("Redis is required for CV task queueing in production")
         logger.warning("Redis not available, storing task in memory (will be lost on restart)")
         _in_memory_tasks[task_id] = task
     return task_id
@@ -65,6 +68,8 @@ async def run_cv_worker(process_func: ProcessFunc) -> None:
     """
     r = await get_redis()
     if r is None:
+        if settings.is_production:
+            raise RuntimeError("Redis is required for the CV worker in production")
         logger.warning("Redis not available, CV worker starting with in-memory queue only")
         async def _process_in_memory():
             """

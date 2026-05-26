@@ -1,10 +1,14 @@
 import { useState, useEffect, useCallback } from 'react';
+import { Link } from 'react-router-dom';
 import api from '../../api/client';
 import { Plus, Pencil, Trash2, GitCompare, X, AlertTriangle } from 'lucide-react';
 import type { Candidate, Job, MatchResult } from '../../types/api';
 import { getApiErrorMessage } from '../../utils/errors';
+import { useAuth } from '../../context/auth';
 
 export default function Jobs() {
+  const { user } = useAuth();
+  const isCandidate = user?.role === 'candidate';
   const [jobs, setJobs] = useState<Job[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [description, setDescription] = useState('');
@@ -124,13 +128,15 @@ export default function Jobs() {
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-bold text-gray-900">Jobs</h1>
-        <button onClick={() => setShowForm(true)} className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
-          <Plus className="w-4 h-4" /> New Job
-        </button>
+        <h1 className="text-2xl font-bold text-gray-900">{isCandidate ? 'Job Posts' : 'Jobs'}</h1>
+        {!isCandidate && (
+          <button onClick={() => setShowForm(true)} className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+            <Plus className="w-4 h-4" /> New Job
+          </button>
+        )}
       </div>
 
-      {showForm && (
+      {showForm && !isCandidate && (
         <div className="bg-white rounded-xl shadow-sm border p-6 mb-6">
           <h2 className="font-semibold mb-3">Create Job Posting</h2>
           <textarea value={description} onChange={(e) => setDescription(e.target.value)}
@@ -143,7 +149,7 @@ export default function Jobs() {
         </div>
       )}
 
-      {editingJob && (
+      {editingJob && !isCandidate && (
         <div className="bg-white rounded-xl shadow-sm border p-6 mb-6">
           <h2 className="font-semibold mb-3">Edit Job</h2>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
@@ -187,7 +193,7 @@ export default function Jobs() {
         </div>
       )}
 
-      {matchingJobId && (
+      {matchingJobId && !isCandidate && (
         <div className="bg-white rounded-xl shadow-sm border p-6 mb-6">
           <div className="flex items-center justify-between mb-4">
             <h2 className="font-semibold">Matching Results</h2>
@@ -206,7 +212,7 @@ export default function Jobs() {
                 const reasoning = r.reasoning || {};
                 const isOverqualified = reasoning.overqualified;
                 const displayName = cand?.full_name || r.candidate_name || r.candidate_id.slice(0, 8);
-                const displaySkills = cand?.skills || r.candidate_skills || [];
+                const displaySkills = cand?.skills?.length ? cand.skills : (r.candidate_skills || []);
                 return (
                   <div key={r.candidate_id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
                     <div>
@@ -256,33 +262,42 @@ export default function Jobs() {
                   ))}
                 </div>
               </div>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => showMatch(job.job_id)}
-                  className="flex items-center gap-1 px-3 py-2 border rounded-lg hover:bg-blue-50 text-blue-600 text-sm"
-                  title="Match candidates"
+              {isCandidate ? (
+                <Link
+                  to={`/my-interviews?job_id=${job.job_id}`}
+                  className="px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm whitespace-nowrap"
                 >
-                  <GitCompare className="w-4 h-4" /> Match
-                </button>
-                <button
-                  onClick={() => startEdit(job)}
-                  className="p-2 border rounded-lg hover:bg-gray-50"
-                  title="Edit"
-                >
-                  <Pencil className="w-4 h-4 text-gray-600" />
-                </button>
-                <button
-                  onClick={() => deleteJob(job.job_id)}
-                  className="p-2 border rounded-lg hover:bg-red-50"
-                  title="Delete"
-                >
-                  <Trash2 className="w-4 h-4 text-red-600" />
-                </button>
-              </div>
+                  Start Interview
+                </Link>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => showMatch(job.job_id)}
+                    className="flex items-center gap-1 px-3 py-2 border rounded-lg hover:bg-blue-50 text-blue-600 text-sm"
+                    title="Match candidates"
+                  >
+                    <GitCompare className="w-4 h-4" /> Match
+                  </button>
+                  <button
+                    onClick={() => startEdit(job)}
+                    className="p-2 border rounded-lg hover:bg-gray-50"
+                    title="Edit"
+                  >
+                    <Pencil className="w-4 h-4 text-gray-600" />
+                  </button>
+                  <button
+                    onClick={() => deleteJob(job.job_id)}
+                    className="p-2 border rounded-lg hover:bg-red-50"
+                    title="Delete"
+                  >
+                    <Trash2 className="w-4 h-4 text-red-600" />
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         ))}
-        {jobs.length === 0 && <p className="text-gray-400 text-center py-8">No jobs yet. Create your first job posting.</p>}
+        {jobs.length === 0 && <p className="text-gray-400 text-center py-8">{isCandidate ? 'No job posts are available yet.' : 'No jobs yet. Create your first job posting.'}</p>}
       </div>
     </div>
   );

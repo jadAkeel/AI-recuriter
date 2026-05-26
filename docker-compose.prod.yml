@@ -36,6 +36,7 @@ services:
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:?JWT_SECRET_KEY is required}
       - CV_STORAGE_PATH=/app/uploads
       - VOICE_TEMP_DIR=/app/temp_audio
+      - RUN_CV_WORKER_IN_API=false
       - ESCO_API_ENABLED=${ESCO_API_ENABLED:-false}
       - RUN_MIGRATIONS=${RUN_MIGRATIONS:-true}
       - SMTP_HOST=${SMTP_HOST:-}
@@ -54,21 +55,81 @@ services:
     cap_drop:
       - ALL
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/v1/health"]
-      interval: 30s
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/v1/ready"]
+      interval: 10s
       timeout: 5s
-      retries: 3
+      retries: 6
+      start_period: 30s
     depends_on:
       db:
         condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+      ollama-bootstrap:
+        condition: service_completed_successfully
     deploy:
       replicas: 2
       resources:
         limits:
           cpus: "2"
           memory: 2G
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: ["python", "-m", "app.worker"]
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:${DB_PASSWORD:?DB_PASSWORD is required}@db:5432/ai_recruiter
+      - EMBEDDING_PROVIDER=ollama
+      - EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
+      - EMBEDDING_DIMENSION=768
+      - LLM_PROVIDER=ollama
+      - OLLAMA_MODEL=llama3.2
+      - OLLAMA_INTERVIEW_MODEL=gemma3:4b
+      - OLLAMA_PARSING_MODEL=llama3.2
+      - OLLAMA_EMBEDDING_MODEL=nomic-embed-text
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - REDIS_URL=redis://redis:6379/0
+      - ENVIRONMENT=production
+      - LOG_LEVEL=INFO
+      - CORS_ORIGINS_STR=https://your-domain.com,https://www.your-domain.com
+      - TRUSTED_HOSTS_STR=your-domain.com,www.your-domain.com
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?JWT_SECRET_KEY is required}
+      - CV_STORAGE_PATH=/app/uploads
+      - VOICE_TEMP_DIR=/app/temp_audio
+      - RUN_MIGRATIONS=false
+      - ESCO_API_ENABLED=${ESCO_API_ENABLED:-false}
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USERNAME=${SMTP_USERNAME:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - SMTP_FROM_EMAIL=${SMTP_FROM_EMAIL:-}
+      - SMTP_TLS=true
+      - APP_BASE_URL=https://your-domain.com
+    volumes:
+      - cv_uploads:/app/uploads
+      - temp_audio:/app/temp_audio
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    depends_on:
+      api:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ollama-bootstrap:
+        condition: service_completed_successfully
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G
 
   db:
     image: pgvector/pgvector:pg16
@@ -80,7 +141,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 5s
+      interval: 2s
       timeout: 5s
       retries: 5
     restart: unless-stopped
@@ -90,12 +151,23 @@ services:
     volumes:
       - redis_data:/data
     command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 5
     restart: unless-stopped
 
   ollama:
     image: ollama/ollama:latest
     volumes:
       - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
     deploy:
       resources:
         reservations:
@@ -104,6 +176,30 @@ services:
               count: all
               capabilities: [gpu]
     restart: unless-stopped
+
+  ollama-bootstrap:
+    image: ollama/ollama:latest
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+      - OLLAMA_MODEL=llama3.2
+      - OLLAMA_INTERVIEW_MODEL=gemma3:4b
+      - OLLAMA_PARSING_MODEL=llama3.2
+      - OLLAMA_EMBEDDING_MODEL=nomic-embed-text
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        set -eu;
+        for model in "llama3.2" "gemma3:4b" "llama3.2" "nomic-embed-text"; do
+          if [ -n "$$model" ]; then
+            echo "Ensuring Ollama model $$model";
+            ollama pull "$$model";
+          fi;
+        done;
+        ollama list
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: "no"
 
 volumes:
   postgres_data:

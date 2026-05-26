@@ -178,6 +178,24 @@ export default function RecruiterInterviews() {
               <ExternalLink className="w-4 h-4" />
               Open Link
             </a>
+            <a
+              href={`${window.location.origin}/interview/live/${invite.session_id}`}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center justify-center gap-2 px-4 py-2 border rounded-lg hover:bg-gray-50 text-sm text-gray-700"
+            >
+              <ExternalLink className="w-4 h-4" />
+              Open Live AI Chat
+            </a>
+            <a
+              href={`${window.location.origin}/interview/video/${invite.session_id}`}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center justify-center gap-2 px-4 py-2 border rounded-lg hover:bg-gray-50 text-sm text-gray-700"
+            >
+              <ExternalLink className="w-4 h-4" />
+              Open Video Interview
+            </a>
           </div>
         </div>
       )}

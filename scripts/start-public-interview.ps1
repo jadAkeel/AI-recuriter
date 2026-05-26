@@ -11,8 +11,8 @@ $rootDir = Split-Path -Parent $PSScriptRoot
 $frontendDir = Join-Path $rootDir "frontend"
 $backendDir = Join-Path $rootDir "backend"
 $envPath = Join-Path $backendDir ".env"
-$localTunnelLog = Join-Path $PSScriptRoot "localtunnel.log"
-$localTunnelErrorLog = Join-Path $PSScriptRoot "localtunnel-error.log"
+$publicTunnelLog = Join-Path $PSScriptRoot "public-tunnel.log"
+$publicTunnelErrorLog = Join-Path $PSScriptRoot "public-tunnel-error.log"
 $frontendProc = $null
 $tunnelProc = $null
 $backendProc = $null
@@ -66,7 +66,7 @@ function Wait-Url {
     throw "Timed out waiting for $Url"
 }
 
-function Wait-LocalTunnelUrl {
+function Wait-PublicTunnelUrl {
     param(
         [string[]]$LogPaths,
         [int]$TimeoutSeconds = 120
@@ -80,16 +80,16 @@ function Wait-LocalTunnelUrl {
                 if ([string]::IsNullOrWhiteSpace($content)) {
                     continue
                 }
-                $match = [Regex]::Match($content, "your url is:\s*(https://[^\s]+)")
+                $match = [Regex]::Match($content, "https://[A-Za-z0-9.-]+")
                 if ($match.Success) {
-                    return $match.Groups[1].Value
+                    return $match.Value
                 }
             }
         }
         Start-Sleep -Seconds 1
     }
 
-    throw "Timed out waiting for localtunnel URL"
+    throw "Timed out waiting for public tunnel URL"
 }
 
 function Get-EnvValue {
@@ -120,11 +120,11 @@ if ($GmailAppPassword) {
     Set-EnvValue -Path $envPath -Key "SMTP_PASSWORD" -Value $GmailAppPassword
 }
 
-if (Test-Path $localTunnelLog) {
-    Remove-Item -LiteralPath $localTunnelLog -Force
+if (Test-Path $publicTunnelLog) {
+    Remove-Item -LiteralPath $publicTunnelLog -Force
 }
-if (Test-Path $localTunnelErrorLog) {
-    Remove-Item -LiteralPath $localTunnelErrorLog -Force
+if (Test-Path $publicTunnelErrorLog) {
+    Remove-Item -LiteralPath $publicTunnelErrorLog -Force
 }
 
 try {
@@ -132,8 +132,8 @@ try {
     $frontendProc = Start-Process -WindowStyle Hidden -PassThru -FilePath "C:\Program Files\nodejs\npm.cmd" -ArgumentList @("run", "dev", "--", "--host", "0.0.0.0", "--port", "$FrontendPort") -WorkingDirectory $frontendDir
     Wait-Url -Url "http://127.0.0.1:$FrontendPort"
 
-    $tunnelProc = Start-Process -WindowStyle Hidden -PassThru -FilePath "C:\Program Files\nodejs\npx.cmd" -ArgumentList @("-y", "localtunnel", "--port", "$FrontendPort", "--local-host", "127.0.0.1") -WorkingDirectory $frontendDir -RedirectStandardOutput $localTunnelLog -RedirectStandardError $localTunnelErrorLog
-    $publicUrl = Wait-LocalTunnelUrl -LogPaths @($localTunnelLog, $localTunnelErrorLog)
+    $tunnelProc = Start-Process -WindowStyle Hidden -PassThru -FilePath "C:\Windows\System32\OpenSSH\ssh.exe" -ArgumentList @("-o", "StrictHostKeyChecking=no", "-o", "ServerAliveInterval=60", "-R", "80:127.0.0.1:$FrontendPort", "nokey@localhost.run") -WorkingDirectory $rootDir -RedirectStandardOutput $publicTunnelLog -RedirectStandardError $publicTunnelErrorLog
+    $publicUrl = Wait-PublicTunnelUrl -LogPaths @($publicTunnelLog, $publicTunnelErrorLog)
     Set-EnvValue -Path $envPath -Key "APP_BASE_URL" -Value $publicUrl
 
     $backendProc = Start-Process -WindowStyle Hidden -PassThru -FilePath "C:\Windows\py.exe" -ArgumentList @("-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "$BackendPort") -WorkingDirectory $backendDir

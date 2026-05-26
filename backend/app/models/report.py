@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import JSON, Float, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, Float, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
@@ -19,3 +19,7 @@ class Report(Base):
     strengths: Mapped[list[str]] = mapped_column(JSON)
     weaknesses: Mapped[list[str]] = mapped_column(JSON)
     recommendation: Mapped[str] = mapped_column(Text)
+    scoring_version: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
+    provider_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    report_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    is_stale: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")

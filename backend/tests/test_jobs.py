@@ -12,9 +12,51 @@ from app.models.job import Job
 from app.models.match_result import MatchResult
 from app.models.report import Report
 from app.models.user import User
+from app.schemas.job import JobUpdateRequest
 from app.services.auth import hash_password
 
 _VEC_384 = [0.0] * 384
+
+
+@pytest.mark.asyncio
+async def test_update_job_embedding_text_includes_title(monkeypatch: pytest.MonkeyPatch):
+    """
+    Checks that job embedding text includes the updated job title.
+    """
+    from app.api import jobs as jobs_api
+
+    class RecordingEmbeddingService:
+        def __init__(self) -> None:
+            self.texts: list[str] = []
+
+        async def embed(self, texts: list[str]) -> list[list[float]]:
+            self.texts.extend(texts)
+            return [[0.0] * 384 for _ in texts]
+
+    await init_db()
+    recorder = RecordingEmbeddingService()
+    monkeypatch.setattr(jobs_api, "get_embedding_service", lambda: recorder)
+
+    async with SessionLocal() as session:
+        job_id = str(uuid.uuid4())
+        session.add(Job(
+            id=job_id,
+            title="Old Title",
+            description="Build APIs with Python.",
+            required_skills=["python"],
+            optional_skills=[],
+            seniority="mid",
+        ))
+        await session.commit()
+
+        await jobs_api.update_job(
+            job_id,
+            JobUpdateRequest(title="ML Platform Engineer"),
+            None,
+            session,
+        )
+
+    assert recorder.texts == ["ML Platform Engineer Build APIs with Python."]
 
 
 @pytest.mark.asyncio

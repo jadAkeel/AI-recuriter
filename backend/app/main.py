@@ -14,7 +14,7 @@ from app.api.router import api_router
 from app.core.config import settings
 from app.core.db import init_db
 from app.core.logging import configure_logging, shutdown_logging
-from app.core.redis import close_redis
+from app.core.redis import close_redis, get_redis
 from app.core.security import RateLimitMiddleware, SecurityHeadersMiddleware
 
 logger = logging.getLogger(__name__)
@@ -29,9 +29,8 @@ async def _cv_worker():
     from app.core.db import SessionLocal
     from app.services.enhanced_cv_parser import get_enhanced_cv_parser
     from app.services.cv_parser import extract_text, parse_cv_text
-    from app.services.candidate_text import build_candidate_embedding_text_from_profile
-    from app.services.embedding import embedding_metadata_for_text, get_embedding_service
-    from app.services.vector_store import VectorStore
+    from app.services.candidate_text import upsert_candidate_embedding
+    from app.services.skill_evidence import replace_candidate_skill_evidence
     from app.models.candidate import Candidate
     from sqlalchemy import select
     from pathlib import Path
@@ -79,22 +78,7 @@ async def _cv_worker():
         candidate.total_years_experience = profile.total_years_experience
         candidate.negative_skills = profile.negative_skills or None
         candidate.learning_skills = profile.learning_skills or None
-
-    # Generate and store vector embedding for the parsed candidate
-    async def _upsert_candidate_embedding(session, candidate_id: str, profile) -> None:
-        """
-        Creates or updates the embedding stored for a candidate profile.
-        """
-        embedder = get_embedding_service()
-        embedding_text = build_candidate_embedding_text_from_profile(profile)
-        embedding = (await embedder.embed([embedding_text]))[0]
-        store = VectorStore(session)
-        await store.upsert_embedding(
-            "candidate",
-            candidate_id,
-            embedding,
-            metadata=embedding_metadata_for_text(embedding_text),
-        )
+        candidate.uncatalogued_skills = profile.uncatalogued_skills or None
 
     async def process_cv(
         cv_text: str | None,
@@ -124,13 +108,14 @@ async def _cv_worker():
                 if existing:
                     _apply_profile_to_candidate(existing, profile)
                     await session.commit()
+                    await replace_candidate_skill_evidence(session, existing, commit=True)
                     if content is not None:
                         _delete_processed_cv_files(existing.id)
                         cv_url = _save_processed_cv(existing.id, file_name, content)
                     else:
                         cv_url = f"/api/v1/candidates/{existing.id}/cv"
                     try:
-                        await _upsert_candidate_embedding(session, existing.id, profile)
+                        await upsert_candidate_embedding(session, existing.id, profile)
                     except Exception:
                         logger.warning(
                             "Embedding update failed for existing candidate %s - candidate data saved",
@@ -144,6 +129,7 @@ async def _cv_worker():
                         "full_name": profile.full_name,
                         "email": profile.email,
                         "skills": profile.skills,
+                        "uncatalogued_skills": profile.uncatalogued_skills,
                         "total_years_experience": profile.total_years_experience,
                         "status": "updated",
                     }
@@ -153,6 +139,7 @@ async def _cv_worker():
             _apply_profile_to_candidate(candidate, profile)
             session.add(candidate)
             await session.commit()
+            await replace_candidate_skill_evidence(session, candidate, commit=True)
 
             cv_url = (
                 _save_processed_cv(candidate_id, file_name, content)
@@ -163,7 +150,7 @@ async def _cv_worker():
                 pending_path.unlink(missing_ok=True)
 
             try:
-                await _upsert_candidate_embedding(session, candidate_id, profile)
+                await upsert_candidate_embedding(session, candidate_id, profile)
             except Exception:
                 logger.warning(
                     "Embedding generation failed for candidate %s — candidate created without vector",
@@ -176,6 +163,7 @@ async def _cv_worker():
                 "full_name": profile.full_name,
                 "email": profile.email,
                 "skills": profile.skills,
+                "uncatalogued_skills": profile.uncatalogued_skills,
                 "total_years_experience": profile.total_years_experience,
                 "status": "created",
             }
@@ -192,14 +180,19 @@ async def lifespan(_: FastAPI):
     try:
         settings.validate_runtime()
         await init_db()
+        if settings.is_production and await get_redis() is None:
+            raise RuntimeError("Redis is required for production CV task queueing")
         logger.info("Embedding provider: %s", settings.embedding_provider)
-        worker_task = asyncio.create_task(_cv_worker())
+        worker_task = asyncio.create_task(_cv_worker()) if settings.run_cv_worker_in_api else None
+        if worker_task is None:
+            logger.info("In-process CV worker disabled; expecting external worker service")
         yield
-        worker_task.cancel()
-        try:
-            await worker_task
-        except asyncio.CancelledError:
-            pass
+        if worker_task is not None:
+            worker_task.cancel()
+            try:
+                await worker_task
+            except asyncio.CancelledError:
+                pass
     finally:
         await close_redis()
         try:

@@ -34,8 +34,11 @@ class Embedding(Base):
     model_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     source_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     embedding_json: Mapped[list[float]] = mapped_column(JSON)
+    embedding_language: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    is_fallback: Mapped[bool] = mapped_column(nullable=False, default=False, server_default="0")
 
     if _USE_VECTOR:
         embedding_vector: Mapped[list[float] | None] = mapped_column(Vector(settings.embedding_dimension), nullable=True)
     else:
         embedding_vector: Mapped[list[float] | None] = mapped_column(JSON, nullable=True)
+
