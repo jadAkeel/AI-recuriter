@@ -1,6 +1,13 @@
 from __future__ import annotations
 
+import json
+import logging
 import re
+from pathlib import Path
+
+from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 # ── All known skills grouped by category ──────────────────────────
@@ -100,6 +107,57 @@ SKILL_CATEGORIES: dict[str, list[str]] = {
         "compliance", "gdpr", "hipaa", "pci dss", "soc 2",
     ],
 }
+
+is_catalog_exhaustive = False
+
+
+def _resolve_data_path(path_value: str) -> Path:
+    """
+    Resolves data paths from either the workspace root or the backend directory.
+    """
+    path = Path(path_value)
+    if path.is_absolute() or path.exists():
+        return path
+    project_root = Path(__file__).resolve().parents[3]
+    return project_root / path
+
+
+def load_extra_skills(path: str | None = None) -> int:
+    """
+    Loads optional generated skills and merges them into the base catalog.
+    """
+    data_path = _resolve_data_path(path or settings.extra_skills_path)
+    if not data_path.exists():
+        return 0
+
+    try:
+        with data_path.open(encoding="utf-8") as handle:
+            data = json.load(handle)
+    except Exception as exc:
+        logger.warning("Failed to load extra skills", extra={"path": str(data_path), "error_type": type(exc).__name__})
+        return 0
+
+    categories = data.get("categories", data) if isinstance(data, dict) else {}
+    if not isinstance(categories, dict):
+        return 0
+
+    added = 0
+    for category, skills in categories.items():
+        if not isinstance(skills, list):
+            continue
+        target = SKILL_CATEGORIES.setdefault(str(category), [])
+        seen = {str(skill).lower().strip() for skill in target}
+        for skill in skills:
+            normalized = " ".join(str(skill or "").strip().lower().split())
+            if not normalized or normalized in seen:
+                continue
+            target.append(normalized)
+            seen.add(normalized)
+            added += 1
+    return added
+
+
+load_extra_skills()
 
 # ── Flat master list of all known skills ──────────────────────────
 SKILL_KEYWORDS = sorted({
@@ -336,6 +394,22 @@ def normalize_skill_list(skills: list[str]) -> list[str]:
     return result
 
 
+def add_dynamic_synonym(skill_a: str, skill_b: str) -> None:
+    """
+    Adds a runtime synonym relationship learned from recruiter feedback.
+    """
+    first = normalize_skill_name(skill_a)
+    second = normalize_skill_name(skill_b)
+    if not first or not second or first == second:
+        return
+    SYNONYM_MAP.setdefault(first, set()).add(second)
+    SYNONYM_MAP.setdefault(second, set()).add(first)
+    SKILL_MATCH_VARIANTS.setdefault(first, {first}).add(second)
+    SKILL_MATCH_VARIANTS.setdefault(second, {second}).add(first)
+    _SKILL_PATTERN_CACHE.pop(first, None)
+    _SKILL_PATTERN_CACHE.pop(second, None)
+
+
 def validate_catalog_skill_list(skills: list[str]) -> list[str]:
     """
     Keeps only known catalog skills from a list.
@@ -436,6 +510,49 @@ def extract_catalog_skills(text: str) -> list[str]:
     """
     normalized_text = normalize_text_for_skill_matching(text)
     return [skill for skill in SKILL_KEYWORDS if skill_in_text(skill, normalized_text)]
+
+
+_UNCATALOGUED_STOPWORDS = {
+    "built",
+    "candidate",
+    "education",
+    "experience",
+    "professional",
+    "projects",
+    "skills",
+    "summary",
+    "technologies",
+    "tools",
+    "using",
+    "workflows",
+}
+
+
+def extract_uncatalogued_skills(text: str, known_skills: list[str] | None = None) -> list[str]:
+    """
+    Finds grounded technical-looking terms that are not in the curated catalog.
+    """
+    known = {normalize_skill_name(skill) for skill in known_skills or []}
+    known.update(SKILL_KEYWORDS)
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for match in re.finditer(r"\b[A-Za-z][A-Za-z0-9+#.-]{2,}(?:\s+[A-Za-z][A-Za-z0-9+#.-]{2,}){0,2}\b", text or ""):
+        raw = " ".join(match.group(0).split())
+        normalized = normalize_skill_name(raw)
+        if not normalized or normalized in known or normalized in seen:
+            continue
+        tokens = normalized.split()
+        if any(token in _UNCATALOGUED_STOPWORDS for token in tokens):
+            continue
+        has_tech_shape = any(char.isupper() for char in raw[1:]) or any(char in raw for char in "+#.-")
+        near_skill_header = (text or "")[max(0, match.start() - 80):match.start()].lower()
+        if not has_tech_shape and not any(header in near_skill_header for header in ("skills", "technologies", "tools")):
+            continue
+        seen.add(normalized)
+        candidates.append(normalized[:120])
+        if len(candidates) >= 50:
+            break
+    return candidates
 
 
 def get_skill_category(skill: str) -> str | None:

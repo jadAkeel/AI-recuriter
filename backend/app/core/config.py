@@ -21,16 +21,21 @@ class Settings(BaseSettings):
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     multilingual_embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     embedding_dimension: int = 384
+    use_multilingual_embedding: bool = False
+    auto_detect_lang: bool = True
 
     # Timeouts and retries for AI/LLM calls
     ai_request_timeout_seconds: float = 45.0
     ai_max_retries: int = 2
     matching_rerank_timeout_seconds: float = 20.0
     redis_url: str = "redis://localhost:6379/0"
+    run_cv_worker_in_api: bool = True
 
     # LLM provider: ollama (local) or openai
     llm_provider: str = "ollama"
     esco_api_enabled: bool = False
+    esco_data_path: str = "backend/data/esco_skills.json"
+    extra_skills_path: str = "backend/data/extra_skills.json"
 
     # Auth / JWT
     jwt_secret_key: str = DEFAULT_JWT_SECRET

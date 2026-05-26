@@ -27,6 +27,7 @@ from app.services.skill_catalog import (
     canonicalize_skill_name,
     normalize_text_for_skill_matching,
     skill_in_text,
+    extract_uncatalogued_skills,
     validate_catalog_skill_list,
 )
 from app.services.stanza_nlp import ParsedText, parse_text_with_stanza
@@ -783,6 +784,7 @@ class EnhancedCVParser:
         skills_detailed: list[SkillDetail],
         negative_skills: list[str],
         learning_skills: list[str],
+        uncatalogued_skills: list[str],
     ) -> CandidateProfile:
         """
         Builds the final structured candidate profile from extracted CV signals.
@@ -795,7 +797,7 @@ class EnhancedCVParser:
         location = self._extract_location(text)
         languages = self._extract_languages(text, sections)
 
-        skills = [s.name for s in skills_detailed if s.status not in {SkillStatus.NO_EXPERIENCE, SkillStatus.LEARNING}]
+        skills = [s.name for s in skills_detailed if s.status != SkillStatus.NO_EXPERIENCE]
 
         experience_entries = self._parse_experience_entries(sections.get("experience", []))
         education_entries = self._parse_education_entries(sections.get("education", []))
@@ -826,6 +828,7 @@ class EnhancedCVParser:
             languages=languages,
             negative_skills=negative_skills,
             learning_skills=learning_skills,
+            uncatalogued_skills=uncatalogued_skills,
             summary=summary,
             raw_text=text,
             parser_version="enhanced-v2",
@@ -837,6 +840,7 @@ class EnhancedCVParser:
                 "skills_count": len(skills),
                 "negative_count": len(negative_skills),
                 "learning_count": len(learning_skills),
+                "uncatalogued_count": len(uncatalogued_skills),
                 "total_years": total_years,
             },
         )
@@ -855,7 +859,8 @@ class EnhancedCVParser:
         else:
             skills_detailed, negative_skills, learning_skills = self._extract_skills_rule_based(normalized, text, parsed_text)
 
-        return self._build_profile(text, skills_detailed, negative_skills, learning_skills)
+        uncatalogued_skills = extract_uncatalogued_skills(text, [skill.name for skill in skills_detailed])
+        return self._build_profile(text, skills_detailed, negative_skills, learning_skills, uncatalogued_skills)
 
     def parse(self, text: str) -> CandidateProfile:
         """
@@ -866,7 +871,8 @@ class EnhancedCVParser:
         parsed_text = self._parse_text_for_nlp(text)
         if not self.use_llm:
             skills_detailed, negative_skills, learning_skills = self._extract_skills_rule_based(normalized, text, parsed_text)
-            return self._build_profile(text, skills_detailed, negative_skills, learning_skills)
+            uncatalogued_skills = extract_uncatalogued_skills(text, [skill.name for skill in skills_detailed])
+            return self._build_profile(text, skills_detailed, negative_skills, learning_skills, uncatalogued_skills)
 
         try:
             asyncio.get_running_loop()

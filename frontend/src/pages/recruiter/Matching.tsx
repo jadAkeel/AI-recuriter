@@ -4,12 +4,16 @@ import { GitCompare, Search, AlertTriangle, Star, X, ChevronDown, ChevronUp, Che
 import type { ApiParams, Candidate, Job, MatchResult, SkillCategory } from '../../types/api';
 import { getApiErrorMessage } from '../../utils/errors';
 
+const MATCHING_JOB_STORAGE_KEY = 'matching:selectedJobId';
+
 export default function Matching() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [candidates, setCandidates] = useState<Record<string, Candidate>>({});
-  const [selectedJobId, setSelectedJobId] = useState('');
+  const [selectedJobId, setSelectedJobId] = useState(() => window.localStorage.getItem(MATCHING_JOB_STORAGE_KEY) || '');
   const [results, setResults] = useState<MatchResult[]>([]);
   const [loading, setLoading] = useState(false);
+  const [savedLoading, setSavedLoading] = useState(false);
+  const [resultSource, setResultSource] = useState<'none' | 'saved' | 'fresh'>('none');
   const [minScore, setMinScore] = useState(0);
   const [showOverqualified, setShowOverqualified] = useState(false);
   const [previewCandidate, setPreviewCandidate] = useState<(Candidate & { match?: MatchResult }) | null>(null);
@@ -32,6 +36,7 @@ export default function Matching() {
   const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const skillPickerRef = useRef<HTMLDivElement>(null);
+  const savedLoadRequestRef = useRef(0);
 
   useEffect(() => {
     Promise.all([
@@ -59,6 +64,42 @@ export default function Matching() {
     return () => document.removeEventListener('mousedown', handleClick);
   }, []);
 
+  useEffect(() => {
+    if (!selectedJobId) {
+      window.localStorage.removeItem(MATCHING_JOB_STORAGE_KEY);
+      setResults([]);
+      setResultSource('none');
+      setSavedLoading(false);
+      return;
+    }
+
+    window.localStorage.setItem(MATCHING_JOB_STORAGE_KEY, selectedJobId);
+    setPreviewCandidate(null);
+    setExpandedAnalysis(null);
+    setPage(1);
+    setError(null);
+    setSavedLoading(true);
+    const requestId = ++savedLoadRequestRef.current;
+
+    api.get<{ results?: MatchResult[] }>(`/jobs/${selectedJobId}/matches`)
+      .then(({ data }) => {
+        if (savedLoadRequestRef.current !== requestId) return;
+        const savedResults = (data.results || []).sort((a, b) => b.score - a.score);
+        setResults(savedResults);
+        setResultSource(savedResults.length > 0 ? 'saved' : 'none');
+      })
+      .catch(() => {
+        if (savedLoadRequestRef.current !== requestId) return;
+        setResults([]);
+        setResultSource('none');
+      })
+      .finally(() => {
+        if (savedLoadRequestRef.current === requestId) {
+          setSavedLoading(false);
+        }
+      });
+  }, [selectedJobId]);
+
   const hasFilters = search || selectedSkills.length > 0 || minYears !== '' || maxYears !== '' || educationSearch || university || degree;
 
   const clearFilters = () => {
@@ -81,6 +122,8 @@ export default function Matching() {
 
   const handleMatch = async () => {
     if (!selectedJobId) return;
+    savedLoadRequestRef.current += 1;
+    setSavedLoading(false);
     setLoading(true);
     setPage(1);
     setError(null);
@@ -95,9 +138,11 @@ export default function Matching() {
       if (degree) params.degree = degree;
       const { data } = await api.post<{ results?: MatchResult[] }>(`/jobs/${selectedJobId}/match`, null, { params });
       setResults((data.results || []).sort((a, b) => b.score - a.score));
+      setResultSource('fresh');
     } catch (err: unknown) {
       setError(getApiErrorMessage(err, 'Matching request failed'));
       setResults([]);
+      setResultSource('none');
     }
     setLoading(false);
   };
@@ -138,7 +183,8 @@ export default function Matching() {
     return { label: 'Weak', color: 'text-red-600 bg-red-50 border-red-200' };
   };
 
-  const formatPct = (value?: number | null) => `${Math.round((value ?? 0) * 100)}%`;
+  const pctValue = (value?: number | null) => Math.max(0, Math.min(100, (value ?? 0) * 100));
+  const formatPct = (value?: number | null) => `${pctValue(value).toFixed(1)}%`;
 
   const factorLabel = (key: string) => {
     const labels: Record<string, string> = {
@@ -149,6 +195,7 @@ export default function Matching() {
       seniority: 'Seniority',
       seniority_match: 'Seniority',
       cross_encoder: 'LLM deep rerank',
+      cross_encoder_adjustment: 'LLM rerank adjustment',
       base_hybrid: 'Base hybrid score',
       missing_required: 'Missing required penalty',
     };
@@ -162,13 +209,14 @@ export default function Matching() {
 
   const getScoreWeight = (reasoning: MatchResult['reasoning'], key: string) => {
     const fallback: Record<string, number> = {
-      skill_required: 0.35,
-      skill_optional: 0.15,
-      semantic: 0.20,
-      experience: 0.15,
-      seniority_match: 0.10,
-      cross_encoder: 0.60,
-      base_hybrid: 0.40,
+      skill_required: 0.55,
+      skill_optional: 0.20,
+      semantic: 0.15,
+      experience: 0.05,
+      seniority_match: 0.05,
+      cross_encoder: 0.25,
+      cross_encoder_adjustment: 0.25,
+      base_hybrid: 0.75,
     };
     return reasoning?.score_weights?.[key] ?? fallback[key];
   };
@@ -182,6 +230,7 @@ export default function Matching() {
     if (key === 'semantic') return reasoning?.semantic_score;
     if (key === 'experience') return reasoning?.years_score;
     if (key === 'cross_encoder') return reasoning?.cross_encoder_score ?? undefined;
+    if (key === 'cross_encoder_adjustment') return reasoning?.cross_encoder_score ?? undefined;
     if (key === 'base_hybrid') return reasoning?.final_score;
     return undefined;
   };
@@ -192,11 +241,11 @@ export default function Matching() {
     }
     const breakdown = reasoning?.score_breakdown || {};
     return {
-      skill_required: 0.35 * (reasoning?.required_score ?? breakdown.skill_required ?? 0),
-      skill_optional: 0.15 * (reasoning?.optional_score ?? breakdown.skill_optional ?? 0),
-      semantic: 0.20 * (reasoning?.semantic_score ?? breakdown.semantic ?? 0),
-      experience: 0.15 * (reasoning?.years_score ?? breakdown.experience ?? 0),
-      seniority_match: 0.10 * (breakdown.seniority ?? 0),
+      skill_required: 0.55 * (reasoning?.required_score ?? breakdown.skill_required ?? 0),
+      skill_optional: 0.20 * (reasoning?.optional_score ?? breakdown.skill_optional ?? 0),
+      semantic: 0.15 * (reasoning?.semantic_score ?? breakdown.semantic ?? 0),
+      experience: 0.05 * (reasoning?.years_score ?? breakdown.experience ?? 0),
+      seniority_match: 0.05 * (breakdown.seniority ?? 0),
     };
   };
 
@@ -234,13 +283,13 @@ export default function Matching() {
             {contributions.map(([key, contribution]) => {
               const rawScore = getRawFactorScore(reasoning, key);
               const weight = getScoreWeight(reasoning, key);
-              const contributionPct = Math.round(contribution * 100);
+              const contributionPct = pctValue(contribution);
               const width = Math.max(4, Math.min(100, contributionPct));
               return (
                 <div key={key} className="bg-white rounded-lg border border-gray-100 p-2">
                   <div className="flex items-center justify-between text-xs mb-1">
                     <span className="font-medium text-gray-700">{factorLabel(key)}</span>
-                    <span className="font-semibold text-indigo-700">+{contributionPct} pts</span>
+                    <span className="font-semibold text-indigo-700">+{contributionPct.toFixed(1)} pts</span>
                   </div>
                   <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
                     <div className="h-1.5 bg-indigo-500 rounded-full" style={{ width: `${width}%` }} />
@@ -341,7 +390,7 @@ export default function Matching() {
         {selectedJob && (
           <span className="text-sm text-gray-500">
             <TrendingUp className="w-4 h-4 inline mr-1" />
-            {results.length} candidates ranked
+            {results.length} candidates ranked{resultSource === 'saved' ? ' from saved results' : ''}
           </span>
         )}
       </div>
@@ -349,7 +398,7 @@ export default function Matching() {
       {/* ── Job Selection ── */}
       <div className="bg-white rounded-xl shadow-sm border p-6 mb-4">
         <div className="flex gap-3 mb-4">
-          <select value={selectedJobId} onChange={(e) => { setSelectedJobId(e.target.value); setResults([]); }}
+          <select value={selectedJobId} onChange={(e) => setSelectedJobId(e.target.value)}
             className="flex-1 px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white">
             <option value="">-- Select a Job --</option>
             {jobs.map((job) => (
@@ -482,10 +531,10 @@ export default function Matching() {
           </div>
         )}
 
-        <button onClick={handleMatch} disabled={loading || !selectedJobId}
+        <button onClick={handleMatch} disabled={loading || savedLoading || !selectedJobId}
           className="mt-4 w-full flex items-center justify-center gap-2 px-4 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-sm font-medium">
-          {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <GitCompare className="w-4 h-4" />}
-          {loading ? 'Matching...' : hasFilters ? 'Run Match with Filters' : 'Run Match'}
+          {loading || savedLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <GitCompare className="w-4 h-4" />}
+          {loading ? 'Matching...' : savedLoading ? 'Loading saved matches...' : hasFilters ? 'Run Match with Filters' : 'Run Match'}
         </button>
       </div>
 
@@ -523,6 +572,13 @@ export default function Matching() {
           </div>
         )}
 
+        {!loading && savedLoading && (
+          <div className="text-center py-12 text-gray-400">
+            <Loader2 className="w-8 h-8 mx-auto mb-3 animate-spin" />
+            <p>Loading saved matches...</p>
+          </div>
+        )}
+
         {error && (
           <div className="bg-red-50 border border-red-200 rounded-xl p-4 mb-4">
             <div className="flex items-start gap-3">
@@ -531,7 +587,7 @@ export default function Matching() {
                 <p className="text-sm font-medium text-red-800">Matching Error</p>
                 <p className="text-sm text-red-600 mt-1">{error}</p>
                 <p className="text-xs text-red-500 mt-2">
-                  Try running with <strong>cross_encoder_top_k=0</strong> to skip heavy LLM scoring, or check the Ollama server status.
+                  Try turning off <strong>LLM deep rerank</strong>, or check the Ollama server status.
                 </p>
               </div>
             </div>
@@ -542,14 +598,15 @@ export default function Matching() {
           const cand = candidates[r.candidate_id];
           const displayName = cand?.full_name || r.candidate_name || `Candidate ${r.candidate_id.slice(0, 8)}`;
           const displayEmail = cand?.email || r.candidate_email;
-          const displaySkills = cand?.skills || r.candidate_skills || [];
+          const displaySkills = cand?.skills?.length ? cand.skills : (r.candidate_skills || []);
           const reasoning = r.reasoning ?? {};
           const matchedSkills = reasoning.matched_required ?? [];
           const missingSkills = reasoning.missing_required ?? [];
           const optionalSkills = reasoning.matched_optional ?? [];
           const isOverqualified = reasoning.overqualified;
           const rank = reasoning.rank || idx + 1;
-          const pct = Math.round(r.score * 100);
+          const pct = pctValue(r.score);
+          const pctLabel = formatPct(r.score);
           const confidence = matchConfidence(r.score);
           const isExpanded = expandedAnalysis === r.candidate_id;
 
@@ -632,12 +689,12 @@ export default function Matching() {
                           strokeLinecap="round" />
                       </svg>
                       <span className={`absolute inset-0 flex items-center justify-center text-sm font-bold ${scoreColor(r.score)}`}>
-                        {pct}%
+                        {pctLabel}
                       </span>
                     </div>
                     <div className="text-[10px] text-gray-400 space-y-0.5">
                       {reasoning.estimated_years !== undefined && <div>~{reasoning.estimated_years}y exp</div>}
-                      {reasoning.skill_score !== undefined && <div>Match: {Math.round(reasoning.skill_score * 100)}%</div>}
+                      {reasoning.skill_score !== undefined && <div>Skill score: {formatPct(reasoning.skill_score)}</div>}
                     </div>
                   </div>
                 </div>
@@ -667,9 +724,9 @@ export default function Matching() {
                         <div className="flex items-center gap-2 mb-1">
                           <div className="flex-1 bg-gray-200 rounded-full h-2">
                             <div className={`h-2 rounded-full ${scoreBg(reasoning.required_score || 0)}`}
-                              style={{ width: `${Math.round((reasoning.required_score || 0) * 100)}%` }} />
+                              style={{ width: `${pctValue(reasoning.required_score)}%` }} />
                           </div>
-                          <span className="text-xs font-medium">{Math.round((reasoning.required_score || 0) * 100)}%</span>
+                          <span className="text-xs font-medium">{formatPct(reasoning.required_score)}</span>
                         </div>
                         <p className="text-xs text-gray-500">{matchedSkills.length} of {(reasoning.matched_required?.length || 0) + (reasoning.missing_required?.length || 0)} matched</p>
                       </div>
@@ -681,9 +738,9 @@ export default function Matching() {
                         <div className="flex items-center gap-2 mb-1">
                           <div className="flex-1 bg-gray-200 rounded-full h-2">
                             <div className={`h-2 rounded-full ${scoreBg(reasoning.optional_score || 0)}`}
-                              style={{ width: `${Math.round((reasoning.optional_score || 0) * 100)}%` }} />
+                              style={{ width: `${pctValue(reasoning.optional_score)}%` }} />
                           </div>
-                          <span className="text-xs font-medium">{Math.round((reasoning.optional_score || 0) * 100)}%</span>
+                          <span className="text-xs font-medium">{formatPct(reasoning.optional_score)}</span>
                         </div>
                         <p className="text-xs text-gray-500">{optionalSkills.length} optional matched</p>
                       </div>
@@ -697,7 +754,7 @@ export default function Matching() {
                             <div className={`h-2.5 rounded-full ${scoreBg(r.score)}`}
                               style={{ width: `${pct}%` }} />
                           </div>
-                          <span className={`text-sm font-bold ${scoreColor(r.score)}`}>{pct}%</span>
+                          <span className={`text-sm font-bold ${scoreColor(r.score)}`}>{pctLabel}</span>
                         </div>
                         <p className="text-xs text-gray-500 mt-1">Weighted scoring from the ranking basis above</p>
                       </div>
@@ -711,11 +768,11 @@ export default function Matching() {
                           </div>
                           <div className="flex items-center justify-between text-xs">
                             <span className="text-gray-500">Required Skills</span>
-                            <span className="font-medium">{Math.round((reasoning.required_score || 0) * 100)}%</span>
+                            <span className="font-medium">{formatPct(reasoning.required_score)}</span>
                           </div>
                           <div className="flex items-center justify-between text-xs">
                             <span className="text-gray-500">Optional Skills</span>
-                            <span className="font-medium">{Math.round((reasoning.optional_score || 0) * 100)}%</span>
+                            <span className="font-medium">{formatPct(reasoning.optional_score)}</span>
                           </div>
                           {reasoning.estimated_years !== undefined && (
                             <div className="flex items-center justify-between text-xs">
@@ -772,10 +829,10 @@ export default function Matching() {
           </div>
         )}
 
-        {!loading && filteredResults.length === 0 && (
+        {!loading && !savedLoading && filteredResults.length === 0 && (
           <div className="text-center py-12 text-gray-400">
             <GitCompare className="w-12 h-12 mx-auto mb-3 opacity-50" />
-            <p>{results.length > 0 ? 'No candidates match the current filters.' : 'Select a job and click Match.'}</p>
+            <p>{results.length > 0 ? 'No candidates match the current filters.' : selectedJobId ? 'No saved matches yet. Run matching for this job.' : 'Select a job and click Match.'}</p>
           </div>
         )}
       </div>
@@ -807,18 +864,18 @@ export default function Matching() {
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-sm font-semibold text-blue-800">ATS Match Score</span>
                     <span className={`text-2xl font-bold ${scoreColor(previewCandidate.match.score)}`}>
-                      {Math.round(previewCandidate.match.score * 100)}%
+                      {formatPct(previewCandidate.match.score)}
                     </span>
                   </div>
                   <div className="w-full bg-blue-100 rounded-full h-2.5 mb-3">
                     <div className={`h-2.5 rounded-full ${scoreBg(previewCandidate.match.score)}`}
-                      style={{ width: `${Math.round(previewCandidate.match.score * 100)}%` }} />
+                      style={{ width: `${pctValue(previewCandidate.match.score)}%` }} />
                   </div>
                   <div className="grid grid-cols-2 gap-3 text-sm">
                     <div><span className="text-gray-500">Rank:</span> <span className="font-medium">#{previewCandidate.match.reasoning?.rank || '-'}</span></div>
                     <div><span className="text-gray-500">Experience:</span> <span className="font-medium">{previewCandidate.match.reasoning?.estimated_years || '-'}y</span></div>
-                    <div><span className="text-gray-500">Required Skills:</span> <span className="font-medium">{Math.round((previewCandidate.match.reasoning?.required_score || 0) * 100)}%</span></div>
-                    <div><span className="text-gray-500">Optional Skills:</span> <span className="font-medium">{Math.round((previewCandidate.match.reasoning?.optional_score || 0) * 100)}%</span></div>
+                    <div><span className="text-gray-500">Required Skills:</span> <span className="font-medium">{formatPct(previewCandidate.match.reasoning?.required_score)}</span></div>
+                    <div><span className="text-gray-500">Optional Skills:</span> <span className="font-medium">{formatPct(previewCandidate.match.reasoning?.optional_score)}</span></div>
                   </div>
                 </div>
               )}

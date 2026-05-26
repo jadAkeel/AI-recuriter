@@ -181,6 +181,7 @@ class CandidateProfile(BaseModel):
     
     negative_skills: list[str] = Field(default_factory=list)
     learning_skills: list[str] = Field(default_factory=list)
+    uncatalogued_skills: list[str] = Field(default_factory=list)
     
     summary: str | None = None
     raw_text: str
@@ -202,6 +203,14 @@ class CandidateProfile(BaseModel):
         Normalizes candidate skill list fields.
         """
         return normalize_skill_list(values)[:120]
+
+    @field_validator("uncatalogued_skills")
+    @classmethod
+    def _normalize_uncatalogued_skills(cls, values: list[str]) -> list[str]:
+        """
+        Cleans additional detected skills without requiring catalog membership.
+        """
+        return _normalize_string_list(values, lowercase=True, max_items=100)
 
     @field_validator("experience", "education", "projects")
     @classmethod

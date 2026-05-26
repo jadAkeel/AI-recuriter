@@ -15,6 +15,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core.config import settings
 from app.models.candidate import Candidate
 from app.models.job import Job
@@ -56,6 +59,8 @@ CURRENT_SCORING_MODELS = {
     CURRENT_CROSS_ENCODER_SCORING_MODEL,
 }
 SCORING_VERSION = "2026-05-19"
+# Keep the LLM reranker advisory: current regression data uses it only as a
+# bounded score adjustment, not as a replacement for deterministic skill fit.
 CROSS_ENCODER_MAX_ADJUSTMENT = 0.05
 
 # Score weights for hybrid matching. Base weights intentionally sum to 1.0 so
@@ -110,17 +115,7 @@ def required_skill_score_cap_from_coverage(required_score: float, has_required_s
     required_score = clamp_score(required_score)
     if not has_required_skills:
         return 1.0
-    if required_score <= 0.0:
-        return 0.40
-    if required_score < 0.5:
-        return 0.55
-    if required_score < 0.75:
-        return 0.75
-    if required_score < 0.9:
-        return 0.85
-    if required_score < 1.0:
-        return 0.90
-    return 1.0
+    return 0.3 + 0.7 * required_score
 
 
 def required_skill_score_cap_reason_from_coverage(required_score: float, has_required_skills: bool) -> str:
@@ -130,22 +125,16 @@ def required_skill_score_cap_reason_from_coverage(required_score: float, has_req
     required_score = clamp_score(required_score)
     if not has_required_skills:
         return "No required skills were defined for this job."
-    if required_score <= 0.0:
-        return "No required-skill evidence matched, so the score is capped at 40%."
-    if required_score < 0.5:
-        return "Required-skill coverage is below 50%, so the score is capped at 55%."
-    if required_score < 0.75:
-        return "Required-skill coverage is between 50% and 75%, so the score is capped at 75%."
-    if required_score < 0.9:
-        return "Required-skill coverage is between 75% and 90%, so the score is capped at 85%."
-    if required_score < 1.0:
-        return "Required-skill coverage is below 100%, so the score is capped at 90%."
-    return "Required-skill coverage is complete, so no required-skill cap was applied."
+    if required_score >= 1.0:
+        return "Required-skill coverage is complete, so no required-skill cap was applied."
+    cap_pct = round((0.3 + 0.7 * required_score) * 100)
+    req_pct = round(required_score * 100)
+    return f"Required-skill coverage is {req_pct}%, so the overall score is capped at {cap_pct}%."
 
 
 def is_interview_blended_reasoning(reasoning: dict[str, Any] | None) -> bool:
     """
-    Checks whether saved reasoning already includes post-interview score blending.
+    Checks whether saved match reasoning already includes interview blending.
     """
     if not isinstance(reasoning, dict):
         return False
@@ -247,7 +236,7 @@ def compute_seniority_score(job_seniority: str | None, candidate_years: float | 
         return max(0.0, min(0.5, ratio * 0.5))
 
     excess = candidate_years - max_years
-    penalty = min(0.3, excess * 0.05)
+    penalty = min(0.15, excess * 0.05)
     return max(0.5, 1.0 - penalty)
 
 
@@ -313,6 +302,12 @@ SENIORITY_YEARS = {
     "staff": (10, 20),
 }
 
+HARD_NEGATION_SKILL_CONTEXT = re.compile(
+    r"(?:don't\s+know|do\s+not\s+know|no\s+experience|not\s+experienced|never\s+used|"
+    r"haven't\s+used|not\s+familiar|don't\s+have|do\s+not\s+have|no\s+knowledge)",
+    re.IGNORECASE,
+)
+
 NON_EVIDENCE_SKILL_CONTEXT = re.compile(
     r"(?:don't\s+know|do\s+not\s+know|no\s+experience|not\s+experienced|never\s+used|"
     r"haven't\s+used|not\s+familiar|don't\s+have|do\s+not\s+have|no\s+knowledge|"
@@ -371,6 +366,8 @@ class SkillMatchResult:
     required_score: float = 0.0
     optional_score: float = 0.0
     esco_coverage: float = 0.0  # % of skills found in ESCO
+    rag_matched_count: int = 0
+    rag_enriched_skills: list[str] = field(default_factory=list)
     
     def to_dict(self) -> dict[str, Any]:
         """
@@ -390,6 +387,8 @@ class SkillMatchResult:
             "required_score": round(self.required_score, 4),
             "optional_score": round(self.optional_score, 4),
             "esco_coverage": round(self.esco_coverage, 4),
+            "rag_matched_count": self.rag_matched_count,
+            "rag_enriched_skills": self.rag_enriched_skills,
         }
 
 
@@ -408,6 +407,8 @@ class MatchReasoning:
     score_cap_reason: str = ""
     matched_skills: list[str] = field(default_factory=list)
     missing_skills: list[str] = field(default_factory=list)
+    rag_matched_count: int = 0
+    rag_enriched_skills: list[str] = field(default_factory=list)
     strengths: list[str] = field(default_factory=list)
     gaps: list[str] = field(default_factory=list)
     overqualified: bool = False
@@ -431,6 +432,8 @@ class MatchReasoning:
             "score_cap_reason": self.score_cap_reason,
             "matched_skills": self.matched_skills,
             "missing_skills": self.missing_skills,
+            "rag_matched_count": self.rag_matched_count,
+            "rag_enriched_skills": self.rag_enriched_skills,
             "strengths": self.strengths,
             "gaps": self.gaps,
             "overqualified": self.overqualified,
@@ -481,6 +484,8 @@ class HybridMatchResult:
             "score_cap_reason": reas.score_cap_reason,
             "matched_skills": reas.matched_skills,
             "missing_skills": reas.missing_skills,
+            "rag_matched_count": reas.rag_matched_count,
+            "rag_enriched_skills": reas.rag_enriched_skills,
             "strengths": reas.strengths,
             "gaps": reas.gaps,
             "overqualified": reas.overqualified,
@@ -516,6 +521,7 @@ class HybridMatchingEngine:
         self.esco = esco_service or get_esco_service()
         self.embedder = embedding_service or get_embedding_service()
         self.weights = {**DEFAULT_WEIGHTS, **(weights or {})}
+        self._historical_feedback: set[tuple[str, str]] = set()
     
     async def match(
         self,
@@ -525,6 +531,7 @@ class HybridMatchingEngine:
         enable_cross_encoder: bool = True,
         cross_encoder_top_k: int = 0,
         vector_store: VectorStore | None = None,
+        rag_session: AsyncSession | None = None,
     ) -> list[HybridMatchResult]:
         """
         Execute full matching pipeline.
@@ -554,6 +561,9 @@ class HybridMatchingEngine:
             },
         )
         
+        rag_session = rag_session or (vector_store.session if vector_store is not None else None)
+        await self._load_historical_feedback(job, candidates, rag_session)
+
         # Step 1: Pre-compute job embedding once (not per candidate)
         job_text = f"{job.title or ''} {job.description}"
         logger.info("Step 1/4: Computing job embedding...")
@@ -638,7 +648,7 @@ class HybridMatchingEngine:
             valid_indices: list[int] = []
             valid_vectors: list[np.ndarray] = []
             for i, emb in enumerate(candidate_embeddings):
-                if emb is not None:
+                if emb is not None and len(emb) == len(job_embedding_vec):
                     valid_indices.append(i)
                     valid_vectors.append(np.array(emb, dtype=np.float32))
             
@@ -659,7 +669,7 @@ class HybridMatchingEngine:
 
         for i, candidate in enumerate(candidates):
             semantic_score = semantic_scores.get(i, 0.0)
-            result = await self._compute_match(job, candidate, semantic_score)
+            result = await self._compute_match(job, candidate, semantic_score, rag_session=rag_session)
             if result:
                 results.append(result)
         
@@ -715,11 +725,19 @@ class HybridMatchingEngine:
         
         return top_results
     
-    async def _compute_match(self, job: Job, candidate: Candidate, semantic_score: float = 0.0) -> HybridMatchResult | None:
+    async def _compute_match(
+        self,
+        job: Job,
+        candidate: Candidate,
+        semantic_score: float = 0.0,
+        rag_session: AsyncSession | None = None,
+    ) -> HybridMatchResult | None:
         """Compute match between a job and candidate."""
         try:
+            if rag_session is not None and not self._historical_feedback:
+                await self._load_historical_feedback(job, [candidate], rag_session)
             # Skill matching
-            skill_result = await self._compute_skill_match(job, candidate)
+            skill_result = await self._compute_skill_match(job, candidate, rag_session=rag_session)
             
             # Experience/seniority matching
             seniority_score = self._compute_seniority_match(job, candidate)
@@ -801,7 +819,12 @@ class HybridMatchingEngine:
             + [candidate.raw_text or ""]
         ).lower()
 
-    async def _compute_skill_match(self, job: Job, candidate: Candidate) -> SkillMatchResult:
+    async def _compute_skill_match(
+        self,
+        job: Job,
+        candidate: Candidate,
+        rag_session: AsyncSession | None = None,
+    ) -> SkillMatchResult:
         """Compute ESCO-aware skill matching."""
         result = SkillMatchResult()
         
@@ -862,6 +885,9 @@ class HybridMatchingEngine:
                     still_missing.append(skill)
             result.missing_required = still_missing
 
+        if result.missing_required and rag_session is not None:
+            await self._apply_rag_enrichment(result, candidate, rag_session)
+
         # Compute scores
         total_required = len(required_skills)
         total_optional = len(optional_skills)
@@ -886,25 +912,133 @@ class HybridMatchingEngine:
         
         return result
 
+    async def _load_historical_feedback(
+        self,
+        job: Job,
+        candidates: list[Candidate],
+        session: AsyncSession | None,
+    ) -> None:
+        """
+        Preloads accepted recruiter feedback so skill matching can reuse it cheaply.
+        """
+        self._historical_feedback = set()
+        if session is None or not candidates:
+            return
+        try:
+            from app.models.skill_feedback import SkillFeedback
+
+            candidate_ids = [candidate.id for candidate in candidates]
+            result = await session.execute(
+                select(SkillFeedback).where(
+                    SkillFeedback.job_id == job.id,
+                    SkillFeedback.candidate_id.in_(candidate_ids),
+                    SkillFeedback.correct_match.is_(True),
+                )
+            )
+            self._historical_feedback = {
+                (feedback.candidate_id, normalize_skill_name(feedback.skill_name))
+                for feedback in result.scalars().all()
+            }
+        except Exception:
+            logger.debug("Historical feedback unavailable for matching", exc_info=True)
+
+    async def _apply_rag_enrichment(
+        self,
+        result: SkillMatchResult,
+        candidate: Candidate,
+        session: AsyncSession,
+    ) -> None:
+        """
+        Uses RAG skill definitions to create weak matches for otherwise missing skills.
+        """
+        try:
+            from app.services.rag import get_skill_definitions
+
+            definitions = await get_skill_definitions(result.missing_required, session=session)
+        except Exception:
+            logger.debug("RAG skill definitions unavailable for matching", exc_info=True)
+            return
+
+        still_missing: list[str] = []
+        for skill in result.missing_required:
+            definition = definitions.get(normalize_skill_name(skill))
+            if not definition:
+                still_missing.append(skill)
+                continue
+            similarity = await self._rag_similarity_for_skill(definition, candidate)
+            if similarity > 0.75:
+                result.matched_required.append(SkillMatch(
+                    skill=skill,
+                    match_type="rag",
+                    confidence=0.60,
+                ))
+                result.rag_matched_count += 1
+                result.rag_enriched_skills.append(skill)
+                logger.info(
+                    "RAG weak skill match applied",
+                    extra={"candidate_id": candidate.id, "skill": skill, "similarity": round(similarity, 4)},
+                )
+            else:
+                still_missing.append(skill)
+        result.missing_required = still_missing
+
+    async def _rag_similarity_for_skill(self, definition: str, candidate: Candidate) -> float:
+        """
+        Scores whether candidate evidence semantically aligns with a RAG skill definition.
+        """
+        candidate_text = self._build_candidate_text(candidate)
+        if not is_embedding_quality_text(definition) or not is_embedding_quality_text(candidate_text):
+            return 0.0
+        if settings.embedding_provider.lower() != "hash":
+            try:
+                import numpy as np
+
+                definition_embedding, candidate_embedding = await self.embedder.embed([definition, candidate_text])
+                if len(definition_embedding) == len(candidate_embedding):
+                    left = np.array(definition_embedding, dtype=np.float32)
+                    right = np.array(candidate_embedding, dtype=np.float32)
+                    denom = float(np.linalg.norm(left) * np.linalg.norm(right))
+                    if denom:
+                        return float(np.dot(left, right) / denom)
+            except Exception:
+                logger.debug("RAG embedding similarity failed; using lexical fallback", exc_info=True)
+
+        definition_tokens = self._content_tokens(definition)
+        candidate_tokens = self._content_tokens(candidate_text)
+        if not definition_tokens or not candidate_tokens:
+            return 0.0
+        overlap = len(definition_tokens & candidate_tokens) / len(definition_tokens)
+        return min(1.0, overlap * 2.0)
+
+    @staticmethod
+    def _content_tokens(text: str) -> set[str]:
+        stopwords = {
+            "and", "are", "for", "from", "into", "that", "the", "this", "with",
+            "skill", "skills", "using", "used", "use", "key", "known",
+        }
+        return {
+            token
+            for token in re.findall(r"[a-zA-Z][a-zA-Z0-9+#.-]{2,}", (text or "").lower())
+            if token not in stopwords
+        }
+
     def _candidate_skill_names(self, candidate: Candidate) -> list[str]:
         """
-        Collects positive candidate skills while excluding learning or negated skills.
+        Collects positive candidate skills while excluding negated or no-experience skills.
         """
         skills = [
             skill for skill in list(candidate.skills or [])
-            if not self._candidate_skill_is_negated(skill, candidate)
+            if not self._candidate_skill_is_negated(skill, candidate, allow_learning=True)
         ]
         for detail in candidate.skills_detailed or []:
             if not isinstance(detail, dict):
                 continue
             status = str(detail.get("status", "")).lower().strip()
             name = str(detail.get("name", "")).strip()
-            context = str(detail.get("context", "") or "").strip()
             if (
                 name
-                and status not in {"no_experience", "learning"}
-                and context
-                and not self._candidate_skill_is_negated(name, candidate)
+                and status != "no_experience"
+                and not self._candidate_skill_is_negated(name, candidate, allow_learning=True)
             ):
                 skills.append(name)
         return self._dedupe_skills(skills)
@@ -933,7 +1067,7 @@ class HybridMatchingEngine:
     ) -> SkillMatch | None:
         """Match a single required skill against candidate skills."""
         req_lower = normalize_skill_name(required_skill)
-        if self._candidate_skill_is_negated(req_lower, candidate):
+        if self._candidate_skill_is_negated(req_lower, candidate, allow_learning=True):
             logger.debug("Required skill '%s' is explicitly negated by candidate evidence", required_skill)
             return None
         
@@ -1002,6 +1136,17 @@ class HybridMatchingEngine:
                             match_type="related",
                             confidence=confidence,
                         )
+
+        # Additional detected skills are grounded but outside the catalog, so keep
+        # them as weak evidence rather than treating them as exact catalog matches.
+        uncatalogued = {normalize_skill_name(skill) for skill in (candidate.uncatalogued_skills or [])}
+        if req_lower in uncatalogued:
+            return SkillMatch(
+                skill=required_skill,
+                normalized=req_norm,
+                match_type="uncatalogued",
+                confidence=0.40,
+            )
         
         # Final fallback: match token-safe mentions in the raw CV text, including
         # curated synonyms such as SQLAlchemy -> SQL and AWS certified -> AWS certificate.
@@ -1019,6 +1164,18 @@ class HybridMatchingEngine:
                     confidence=confidence,
                 )
 
+        if (candidate.id, req_lower) in self._historical_feedback:
+            logger.info(
+                "Matched via historical feedback",
+                extra={"candidate_id": candidate.id, "skill": required_skill},
+            )
+            return SkillMatch(
+                skill=required_skill,
+                normalized=req_norm,
+                match_type="historical_feedback",
+                confidence=0.70,
+            )
+
         logger.debug(f"âœ— No match found for '{required_skill}'")
         return None
 
@@ -1026,18 +1183,39 @@ class HybridMatchingEngine:
         """
         Lowers match confidence when a skill lacks supporting candidate evidence.
         """
+        is_learning = False
+        skill_lower = normalize_skill_name(skill)
+        for detail in candidate.skills_detailed or []:
+            if not isinstance(detail, dict):
+                continue
+            name = normalize_skill_name(str(detail.get("name", "")))
+            status = str(detail.get("status", "")).lower().strip()
+            if name == skill_lower and status == "learning":
+                is_learning = True
+                break
+        if not is_learning:
+            learning_skills = {normalize_skill_name(s) for s in (candidate.learning_skills or [])}
+            if skill_lower in learning_skills:
+                is_learning = True
+
+        if is_learning:
+            return min(base_confidence, 0.60)
+
         if self._candidate_has_skill_evidence(skill, candidate):
             return base_confidence
         return min(base_confidence, 0.80)
 
-    def _candidate_skill_is_negated(self, skill: str, candidate: Candidate) -> bool:
+    def _candidate_skill_is_negated(self, skill: str, candidate: Candidate, allow_learning: bool = False) -> bool:
         """
         Checks whether the candidate explicitly denies or is only learning a skill.
         """
         skill_lower = normalize_skill_name(skill)
+        neg_list = list(candidate.negative_skills or [])
+        if not allow_learning:
+            neg_list += list(candidate.learning_skills or [])
         negative_skills = {
             normalize_skill_name(item)
-            for item in list(candidate.negative_skills or []) + list(candidate.learning_skills or [])
+            for item in neg_list
         }
         if skill_lower in negative_skills:
             return True
@@ -1048,9 +1226,16 @@ class HybridMatchingEngine:
             name = normalize_skill_name(str(detail.get("name", "")))
             status = str(detail.get("status", "")).lower().strip()
             context = str(detail.get("context", "") or "")
-            if name == skill_lower and status in {"no_experience", "learning"}:
+            neg_statuses = {"no_experience"}
+            if not allow_learning:
+                neg_statuses.add("learning")
+            if name == skill_lower and status in neg_statuses:
                 return True
-            if name == skill_lower and self._text_has_negative_skill(skill_lower, context):
+            if name == skill_lower and self._text_has_negative_skill(
+                skill_lower,
+                context,
+                include_learning=not allow_learning,
+            ):
                 return True
 
         evidence_text = " ".join(
@@ -1059,7 +1244,11 @@ class HybridMatchingEngine:
             + list(candidate.education or [])
             + [candidate.raw_text or ""]
         )
-        return self._text_has_negative_skill(skill_lower, evidence_text)
+        return self._text_has_negative_skill(
+            skill_lower,
+            evidence_text,
+            include_learning=not allow_learning,
+        )
 
     def _candidate_has_skill_evidence(self, skill: str, candidate: Candidate) -> bool:
         """
@@ -1100,17 +1289,18 @@ class HybridMatchingEngine:
                 return True
         return False
 
-    def _text_has_negative_skill(self, skill: str, text: str) -> bool:
+    def _text_has_negative_skill(self, skill: str, text: str, include_learning: bool = True) -> bool:
         """
-        Checks text for negated or learning-only skill evidence.
+        Checks text for negated skill evidence, optionally including learning-only phrases.
         """
         text_lower = str(text or "").lower()
         matches = list(build_skill_pattern(skill).finditer(text_lower))
         if not matches:
             return False
+        negative_pattern = NON_EVIDENCE_SKILL_CONTEXT if include_learning else HARD_NEGATION_SKILL_CONTEXT
         for match in matches:
             window = text_lower[max(0, match.start() - 80): match.end() + 80]
-            if NON_EVIDENCE_SKILL_CONTEXT.search(window):
+            if negative_pattern.search(window):
                 return True
         return False
 
@@ -1203,6 +1393,8 @@ class HybridMatchingEngine:
             "required_matched_count": len(skill_result.matched_required),
             "required_total": total_required,
             "optional_matched_count": len(skill_result.matched_optional),
+            "rag_matched_count": skill_result.rag_matched_count,
+            "rag_enriched_skills": skill_result.rag_enriched_skills,
             "required_confidence_sum": round(sum(match.confidence for match in skill_result.matched_required), 4),
             "optional_confidence_sum": round(sum(match.confidence for match in skill_result.matched_optional), 4),
             "required_score_type": "confidence_weighted_coverage",
@@ -1215,6 +1407,8 @@ class HybridMatchingEngine:
         # Matched and missing skills
         reasoning.matched_skills = [m.skill for m in skill_result.matched_required]
         reasoning.missing_skills = skill_result.missing_required.copy()
+        reasoning.rag_matched_count = skill_result.rag_matched_count
+        reasoning.rag_enriched_skills = skill_result.rag_enriched_skills.copy()
         
         # Strengths
         if skill_result.required_score >= 0.8:
@@ -1223,6 +1417,8 @@ class HybridMatchingEngine:
             reasoning.strengths.append("Good semantic alignment")
         if project_semantic_bonus > 0:
             reasoning.strengths.append("Relevant project evidence for junior role")
+        if skill_result.rag_matched_count:
+            reasoning.strengths.append("RAG knowledge base supplied weak skill evidence")
         if seniority_score >= 0.8:
             reasoning.strengths.append("Experience level matches role")
         
@@ -1427,7 +1623,11 @@ class HybridMatchingEngine:
             pairs = []
             ordered_ids = []
             
-            job_text = f"{job.title or ''} {job.description}"
+            job_text = (
+                f"{job.title or ''} {job.description}. "
+                f"Required skills: {', '.join(job.required_skills or [])}. "
+                f"Optional skills: {', '.join(job.optional_skills or [])}."
+            )
             for cid in candidate_ids:
                 if cid in candidate_map:
                     candidate = candidate_map[cid]

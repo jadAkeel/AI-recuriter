@@ -200,9 +200,9 @@ def test_enhanced_parser_does_not_treat_domain_learning_as_learning_status() -> 
     assert "c++" not in profile.learning_skills
 
 
-def test_enhanced_parser_marks_active_learning_as_non_experience() -> None:
+def test_enhanced_parser_keeps_active_learning_searchable() -> None:
     """
-    Checks that enhanced parser marks active learning as non experience.
+    Checks that enhanced parser keeps active learning skills searchable.
     """
     parser = get_simple_cv_parser()
     profile = parser.parse(
@@ -214,7 +214,7 @@ def test_enhanced_parser_marks_active_learning_as_non_experience() -> None:
     )
 
     assert "python" in profile.skills
-    assert "docker" not in profile.skills
+    assert "docker" in profile.skills
     assert "docker" in profile.learning_skills
     docker_detail = next(item for item in profile.skills_detailed if item.name == "docker")
     assert docker_detail.status == "learning"
@@ -307,7 +307,7 @@ def test_create_candidate_succeeds_when_embedding_fails(monkeypatch: pytest.Monk
     """
     Checks that create candidate succeeds when embedding fails.
     """
-    from app.api import candidates as candidates_api
+    from app.services import embedding as embedding_service
 
     class FailingEmbeddingService:
         async def embed(self, texts: list[str]) -> list[list[float]]:
@@ -335,7 +335,7 @@ def test_create_candidate_succeeds_when_embedding_fails(monkeypatch: pytest.Monk
             await session.commit()
         return email, password
 
-    monkeypatch.setattr(candidates_api, "get_embedding_service", lambda: FailingEmbeddingService())
+    monkeypatch.setattr(embedding_service, "get_embedding_service", lambda: FailingEmbeddingService())
 
     email, password = asyncio.run(_seed_recruiter())
     app = create_app()

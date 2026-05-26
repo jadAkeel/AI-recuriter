@@ -1,9 +1,13 @@
 import { useState, useEffect } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import api from '../../api/client';
-import { Send, MessageSquare, Briefcase } from 'lucide-react';
+import { AlertTriangle, Send, MessageSquare, Briefcase } from 'lucide-react';
 import type { InterviewEvaluation, InterviewSessionResponse, Job } from '../../types/api';
+import { getApiErrorMessage } from '../../utils/errors';
 
 export default function CandidateInterview() {
+  const [searchParams] = useSearchParams();
+  const requestedJobId = searchParams.get('job_id');
   const [jobs, setJobs] = useState<Job[]>([]);
   const [selectedJobId, setSelectedJobId] = useState('');
   const [session, setSession] = useState<InterviewSessionResponse | null>(null);
@@ -11,23 +15,32 @@ export default function CandidateInterview() {
   const [currentQIndex, setCurrentQIndex] = useState(0);
   const [evaluation, setEvaluation] = useState<InterviewEvaluation | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+  const [useLlm, setUseLlm] = useState(true);
 
   useEffect(() => {
-    api.get<Job[]>('/jobs').then(({ data }) => setJobs(Array.isArray(data) ? data : [])).catch(() => {
-      // Keep the page usable when jobs cannot be loaded.
+    api.get<Job[]>('/jobs').then(({ data }) => {
+      const list = Array.isArray(data) ? data : [];
+      setJobs(list);
+      if (requestedJobId && list.some((job) => job.job_id === requestedJobId)) {
+        setSelectedJobId(requestedJobId);
+      }
+    }).catch((err: unknown) => {
+      setError(getApiErrorMessage(err, 'Could not load jobs'));
     });
-  }, []);
+  }, [requestedJobId]);
 
   const startInterview = async () => {
     if (!selectedJobId) return;
+    setError('');
     try {
       const me = (await api.get<{ candidate_id: string }>('/candidates/me')).data;
       const { data } = await api.post('/interviews/start', { job_id: selectedJobId, candidate_id: me.candidate_id });
       setSession(data);
       setCurrentQIndex(0);
       setEvaluation(null);
-    } catch {
-      // Start failures are surfaced by keeping the initial form visible.
+    } catch (err: unknown) {
+      setError(getApiErrorMessage(err, 'Could not start interview. Upload your CV first, then try again.'));
     }
   };
 
@@ -43,7 +56,7 @@ export default function CandidateInterview() {
     try {
       await api.post('/interviews/answer', {
         session_id: session.session_id, question_id: questionId, answer: currentAnswer,
-      });
+      }, { params: { use_llm: useLlm } });
       setCurrentAnswer('');
 
       if (currentQIndex < session.questions.length - 1) {
@@ -52,8 +65,8 @@ export default function CandidateInterview() {
         const { data } = await api.post('/interviews/evaluate', { session_id: session.session_id });
         setEvaluation(data);
       }
-    } catch {
-      // Keep the typed answer available if submission fails.
+    } catch (err: unknown) {
+      setError(getApiErrorMessage(err, 'Could not save answer. Please try again.'));
     }
     setSubmitting(false);
   };
@@ -90,6 +103,20 @@ export default function CandidateInterview() {
   return (
     <div>
       <h1 className="text-2xl font-bold text-gray-900 mb-6">AI Interview</h1>
+
+      {error && (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-6 flex items-start gap-3">
+          <AlertTriangle className="w-5 h-5 text-red-500 mt-0.5" />
+          <div className="text-sm text-red-700">
+            <p>{error}</p>
+            {error.toLowerCase().includes('candidate profile') && (
+              <Link to="/upload-cv" className="inline-block mt-2 font-medium text-red-800 underline">
+                Upload CV
+              </Link>
+            )}
+          </div>
+        </div>
+      )}
 
       {!session && (
         <div className="bg-white rounded-xl shadow-sm border p-6">
@@ -135,6 +162,15 @@ export default function CandidateInterview() {
                 <span className="text-sm text-gray-500">Question {currentQIndex + 1} of {session.questions.length}</span>
                 <span className="text-xs bg-blue-50 text-blue-600 px-2 py-0.5 rounded">{session.questions[currentQIndex]?.skill}</span>
               </div>
+              <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={useLlm}
+                  onChange={(event) => setUseLlm(event.target.checked)}
+                  className="rounded accent-blue-600"
+                />
+                Use LLM evaluation
+              </label>
               <div className="flex items-center gap-1 text-xs text-gray-400">
                 <Briefcase className="w-3 h-3" />
                 {session.job_title || 'Job'}

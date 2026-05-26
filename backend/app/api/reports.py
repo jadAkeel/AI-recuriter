@@ -10,6 +10,7 @@ from app.core.db import get_db_session
 from app.core.deps import ensure_candidate_access, require_any_role
 from app.models.match_result import MatchResult
 from app.models.report import Report
+from app.models.report_version import ReportVersion
 from app.models.user import User
 from app.schemas.report import (
     CandidateReportRequest,
@@ -38,7 +39,12 @@ async def report_candidate(
     """
     try:
         await ensure_candidate_access(session, current_user, request.candidate_id)
-        return await generate_candidate_report(session, request.job_id, request.candidate_id)
+        return await generate_candidate_report(
+            session,
+            request.job_id,
+            request.candidate_id,
+            actor_user_id=current_user.id,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -68,6 +74,12 @@ async def delete_report_candidate(
     """
     Deletes a saved candidate report.
     """
+    await session.execute(
+        delete(ReportVersion).where(
+            ReportVersion.job_id == job_id,
+            ReportVersion.candidate_id == candidate_id,
+        )
+    )
     await session.execute(
         delete(Report).where(
             Report.job_id == job_id,

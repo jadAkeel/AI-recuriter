@@ -1,0 +1,4 @@
+Backend Engineer
+We need a backend engineer with Python, FastAPI, PostgreSQL, Docker, and Redis experience.
+Required skills: Python, FastAPI, PostgreSQL
+Optional skills: Docker, Redis

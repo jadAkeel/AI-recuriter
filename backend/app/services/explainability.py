@@ -12,6 +12,7 @@ from app.models.candidate import Candidate
 from app.models.job import Job
 from app.models.match_result import MatchResult
 from app.models.report import Report
+from app.models.report_version import ReportVersion
 from app.schemas.report import (
     CandidateReportResponse,
     ComparisonItem,
@@ -20,6 +21,8 @@ from app.schemas.report import (
     SkillGapAnalysis,
     SkillGapItem,
 )
+from app.services.ai_metadata import current_ai_provider_metadata, scoring_version_from_reasoning
+from app.services.audit import create_audit_log
 from app.services.hybrid_matcher import (
     BASE_SCORING_FORMULA,
     HybridMatchingEngine,
@@ -375,6 +378,7 @@ async def generate_candidate_report(
     candidate_id: str,
     *,
     use_match_score: bool = True,
+    actor_user_id: str | None = None,
 ) -> CandidateReportResponse:
     """
     Generates and stores an explainable report for one candidate and job.
@@ -454,6 +458,9 @@ async def generate_candidate_report(
             current_match.reasoning.score_trace["previous_scoring_model"] = previous_scoring_model
             match.score = current_match.final_score
             match.reasoning = current_match.to_dict()
+            match.scoring_version = scoring_version_from_reasoning(match.reasoning)
+            match.provider_metadata = current_ai_provider_metadata()
+            match.is_stale = False
             reasoning = match.reasoning
             match_is_current = True
             similarity_score = round(current_match.semantic_score, 4)
@@ -533,12 +540,52 @@ async def generate_candidate_report(
         report = Report(id=str(uuid.uuid4()), job_id=job_id, candidate_id=candidate_id, overall_score=overall_score,
                         score_breakdown={}, skill_gap={}, strengths=[], weaknesses=[], recommendation="")
         session.add(report)
+        report.report_version = 1
+    else:
+        report.report_version = int(report.report_version or 1) + 1
     report.overall_score = overall_score
     report.score_breakdown = score_breakdown.model_dump()
     report.skill_gap = skill_gap.model_dump()
     report.strengths = strengths
     report.weaknesses = weaknesses
     report.recommendation = recommendation
+    report.scoring_version = scoring_version_from_reasoning(reasoning if isinstance(reasoning, dict) else score_trace)
+    report.provider_metadata = current_ai_provider_metadata()
+    report.is_stale = False
+
+    report_payload = {
+        "job_title": job.title,
+        "candidate_name": candidate.full_name,
+        "score_breakdown": score_breakdown.model_dump(),
+        "skill_gap": skill_gap.model_dump(),
+        "strengths": strengths,
+        "weaknesses": weaknesses,
+        "recommendation": recommendation,
+    }
+    session.add(ReportVersion(
+        id=str(uuid.uuid4()),
+        report_id=report.id,
+        job_id=job_id,
+        candidate_id=candidate_id,
+        version=report.report_version,
+        scoring_version=report.scoring_version,
+        provider_metadata=report.provider_metadata,
+        payload=report_payload,
+        created_by_user_id=actor_user_id,
+    ))
+    await create_audit_log(
+        session,
+        entity_type="report",
+        entity_id=report.id,
+        action="report.generated",
+        actor_user_id=actor_user_id,
+        details={
+            "job_id": job_id,
+            "candidate_id": candidate_id,
+            "report_version": report.report_version,
+            "scoring_version": report.scoring_version,
+        },
+    )
     await session.commit()
 
     return CandidateReportResponse(
@@ -637,6 +684,9 @@ async def compare_candidates(
                     current_match.reasoning.score_trace["previous_scoring_model"] = previous_scoring_model
                     match.score = current_match.final_score
                     match.reasoning = current_match.to_dict()
+                    match.scoring_version = scoring_version_from_reasoning(match.reasoning)
+                    match.provider_metadata = current_ai_provider_metadata()
+                    match.is_stale = False
                     reasoning = match.reasoning
                     similarity = round(current_match.semantic_score, 4)
                     skill_data["skill_score"] = current_match.skill_match.skill_score

@@ -9,7 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.knowledge import KnowledgeDocument
 from app.schemas.rag import DocumentItem, IngestResponse, QueryResponse
-from app.services.embedding import get_embedding_service
+from app.services.embedding import (
+    get_embedding_service,
+    get_multilingual_embedding_service,
+    get_standard_embedding_service,
+    is_arabic,
+    detect_language,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,14 +55,22 @@ INITIAL_KNOWLEDGE: list[dict[str, Any]] = [
 
 async def _generate_and_store_embedding(document: KnowledgeDocument) -> None:
     """
-    Generates an embedding for a knowledge document when possible.
+    Generates English and Multilingual embeddings for a knowledge document when possible.
     """
     try:
-        embedder = get_embedding_service()
-        emb = (await embedder.embed([document.content]))[0]
-        document.embedding = emb
+        std_embedder = get_standard_embedding_service()
+        std_emb = (await std_embedder.embed([document.content]))[0]
+        document.embedding = std_emb
     except Exception:
-        logger.warning("Failed to generate embedding for document: %s", document.title)
+        logger.warning("Failed to generate standard embedding for document: %s", document.title)
+
+    try:
+        multi_embedder = get_multilingual_embedding_service()
+        multi_emb = (await multi_embedder.embed([document.content]))[0]
+        document.embedding_multilingual = multi_emb
+    except Exception:
+        logger.warning("Failed to generate multilingual embedding for document: %s", document.title)
+
 
 
 async def ingest_knowledge_base(session: AsyncSession) -> int:
@@ -123,21 +137,39 @@ async def query_knowledge(
     result = await session.execute(stmt)
     documents = result.scalars().all()
 
+    # Auto-detect language
+    query_language = detect_language(query)
+    use_multilingual = query_language == "ar"
+
     try:
-        embedder = get_embedding_service()
+        if use_multilingual:
+            embedder = get_multilingual_embedding_service()
+        else:
+            embedder = get_standard_embedding_service()
+            
         query_emb = (await embedder.embed([query]))[0]
     except Exception:
         logger.warning("Knowledge query embedding failed")
-        return QueryResponse(query=query, results=[])
+        return QueryResponse(query=query, results=[], query_language=query_language)
 
     import numpy as np
     query_np = np.array(query_emb)
     query_norm = np.linalg.norm(query_np)
     scored: list[tuple[KnowledgeDocument, float]] = []
     for doc in documents:
-        emb = doc.embedding
+        # If query is Arabic/Multilingual, rank against embedding_multilingual.
+        # Otherwise, rank against standard embedding.
+        emb = doc.embedding_multilingual if use_multilingual else doc.embedding
+        if emb is None:
+            emb = doc.embedding if use_multilingual else doc.embedding_multilingual
+            
         if emb is None:
             continue
+            
+        # Safeguard dimension mismatch
+        if len(emb) != len(query_emb):
+            continue
+            
         doc_np = np.array(emb)
         sim = float(np.dot(query_np, doc_np) / (query_norm * np.linalg.norm(doc_np) + 1e-8))
         scored.append((doc, sim))
@@ -153,4 +185,43 @@ async def query_knowledge(
         )
         for doc, score in scored[:top_k]
     ]
-    return QueryResponse(query=query, results=results)
+    return QueryResponse(query=query, results=results, query_language=query_language)
+
+
+async def get_skill_definitions(
+    skills: list[str],
+    session: AsyncSession | None = None,
+) -> dict[str, str]:
+    """
+    Returns knowledge-base definitions for requested skills.
+    """
+    if session is None:
+        from app.core.db import SessionLocal
+
+        async with SessionLocal() as managed_session:
+            return await get_skill_definitions(skills, managed_session)
+
+    normalized_skills = [" ".join(skill.lower().split()) for skill in skills if str(skill).strip()]
+    if not normalized_skills:
+        return {}
+
+    result = await session.execute(select(KnowledgeDocument).where(KnowledgeDocument.category == "skill"))
+    documents = result.scalars().all()
+    definitions: dict[str, str] = {}
+    for skill in normalized_skills:
+        best: tuple[KnowledgeDocument, int] | None = None
+        for document in documents:
+            title = " ".join((document.title or "").lower().split())
+            tags = {" ".join(str(tag).lower().split()) for tag in document.tags or []}
+            score = 0
+            if skill in tags:
+                score = 3
+            elif skill in title:
+                score = 2
+            elif skill in " ".join((document.content or "").lower().split()):
+                score = 1
+            if score and (best is None or score > best[1]):
+                best = (document, score)
+        if best:
+            definitions[skill] = best[0].content
+    return definitions

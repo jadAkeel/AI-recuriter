@@ -22,5 +22,6 @@ class Candidate(Base):
     projects: Mapped[list[str]] = mapped_column(JSON)
     negative_skills: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     learning_skills: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    uncatalogued_skills: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     total_years_experience: Mapped[float | None] = mapped_column(Float, nullable=True)
     raw_text: Mapped[str] = mapped_column(Text)

@@ -14,6 +14,8 @@ from app.models.interview import InterviewSession
 from app.models.job import Job
 from app.models.match_result import MatchResult
 from app.models.report import Report
+from app.models.report_version import ReportVersion
+from app.models.skill_feedback import SkillFeedback
 from app.models.user import User
 from app.schemas.job import JobParseRequest, JobProfile, JobRecord, JobUpdateRequest
 from app.services.embedding import embedding_metadata_for_text, get_embedding_service
@@ -118,13 +120,14 @@ async def create_job(
 
     try:
         embedder = get_embedding_service()
-        embedding = (await embedder.embed([profile.description]))[0]
+        job_text = f"{profile.title or ''} {profile.description}"
+        embedding = (await embedder.embed([job_text]))[0]
         store = VectorStore(session)
         await store.upsert_embedding(
             "job",
             job_id,
             embedding,
-            metadata=embedding_metadata_for_text(profile.description),
+            metadata=embedding_metadata_for_text(job_text),
         )
     except Exception:
         logger.warning("Embedding generation failed for job %s — job created without vector", job_id)
@@ -173,19 +176,22 @@ async def update_job(
 
     if matching_inputs_changed:
         await session.execute(delete(MatchResult).where(MatchResult.job_id == job_id))
+        await session.execute(delete(ReportVersion).where(ReportVersion.job_id == job_id))
+        await session.execute(delete(Report).where(Report.job_id == job_id))
 
     await session.commit()
 
-    if request.description is not None:
+    if request.description is not None or request.title is not None:
         try:
             embedder = get_embedding_service()
-            embedding = (await embedder.embed([job.description]))[0]
+            job_text = f"{job.title or ''} {job.description}"
+            embedding = (await embedder.embed([job_text]))[0]
             store = VectorStore(session)
             await store.upsert_embedding(
                 "job",
                 job_id,
                 embedding,
-                metadata=embedding_metadata_for_text(job.description),
+                metadata=embedding_metadata_for_text(job_text),
             )
         except Exception:
             logger.warning("Embedding update failed for job %s — job data saved", job_id)
@@ -210,7 +216,9 @@ async def delete_job(
         raise HTTPException(status_code=404, detail="Job not found")
 
     await session.execute(delete(MatchResult).where(MatchResult.job_id == job_id))
+    await session.execute(delete(SkillFeedback).where(SkillFeedback.job_id == job_id))
     await session.execute(delete(InterviewSession).where(InterviewSession.job_id == job_id))
+    await session.execute(delete(ReportVersion).where(ReportVersion.job_id == job_id))
     await session.execute(delete(Report).where(Report.job_id == job_id))
     await session.execute(
         delete(Embedding).where(

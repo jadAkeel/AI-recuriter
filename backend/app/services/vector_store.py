@@ -41,23 +41,37 @@ class VectorStore:
         result = await self.session.execute(stmt)
         row = result.scalar_one_or_none()
 
+        meta = metadata or {}
+        provider = meta.get("provider") or "hash"
+        is_fallback = meta.get("is_fallback")
+        if is_fallback is None:
+            is_fallback = provider.lower() == "hash"
+        if isinstance(is_fallback, str):
+            is_fallback = is_fallback.lower() == "true"
+        
+        embedding_language = meta.get("embedding_language")
+
         if row is None:
             row = Embedding(
                 entity_type=entity_type,
                 entity_id=entity_id,
-                provider=(metadata or {}).get("provider"),
-                model_name=(metadata or {}).get("model_name"),
-                source_hash=(metadata or {}).get("source_hash"),
+                provider=provider,
+                model_name=meta.get("model_name"),
+                source_hash=meta.get("source_hash"),
                 embedding_json=embedding,
                 embedding_vector=embedding,
+                embedding_language=embedding_language,
+                is_fallback=bool(is_fallback),
             )
             self.session.add(row)
         else:
-            row.provider = (metadata or {}).get("provider")
-            row.model_name = (metadata or {}).get("model_name")
-            row.source_hash = (metadata or {}).get("source_hash")
+            row.provider = provider
+            row.model_name = meta.get("model_name")
+            row.source_hash = meta.get("source_hash")
             row.embedding_json = embedding
             row.embedding_vector = embedding
+            row.embedding_language = embedding_language
+            row.is_fallback = bool(is_fallback)
 
         if commit:
             await self.session.commit()
@@ -67,6 +81,7 @@ class VectorStore:
         entity_type: str,
         embedding: list[float],
         top_k: int = 5,
+        language: str | None = None,
     ) -> list[tuple[str, float]]:
         """
         Finds the most similar stored embeddings for an entity type.
@@ -75,27 +90,33 @@ class VectorStore:
         if np.linalg.norm(np.array(embedding, dtype=np.float32)) == 0:
             return []
         if self.is_postgres:
-            return await self._query_postgres(entity_type, embedding, top_k)
+            return await self._query_postgres(entity_type, embedding, top_k, language)
 
-        return await self._query_in_memory(entity_type, embedding, top_k)
+        return await self._query_in_memory(entity_type, embedding, top_k, language)
 
     async def _query_postgres(
         self,
         entity_type: str,
         embedding: list[float],
         top_k: int,
+        language: str | None = None,
     ) -> list[tuple[str, float]]:
         """
         Queries PostgreSQL pgvector for nearest embeddings.
         """
         if Embedding.embedding_vector is None:
             logger.warning("Vector column unavailable, falling back to in-memory scoring")
-            return await self._query_in_memory(entity_type, embedding, top_k)
+            return await self._query_in_memory(entity_type, embedding, top_k, language)
 
         stmt: Select = (
             select(Embedding.entity_id, Embedding.embedding_vector.cosine_distance(embedding))
             .where(Embedding.entity_type == entity_type)
-            .order_by(Embedding.embedding_vector.cosine_distance(embedding))
+        )
+        if language:
+            stmt = stmt.where(Embedding.embedding_language == language)
+            
+        stmt = (
+            stmt.order_by(Embedding.embedding_vector.cosine_distance(embedding))
             .limit(top_k)
         )
         result = await self.session.execute(stmt)
@@ -107,6 +128,7 @@ class VectorStore:
         entity_type: str,
         embedding: list[float],
         top_k: int,
+        language: str | None = None,
     ) -> list[tuple[str, float]]:
         """
         Computes cosine similarity in Python for non-pgvector databases.
@@ -114,6 +136,8 @@ class VectorStore:
         stmt = select(Embedding.entity_id, Embedding.embedding_json).where(
             Embedding.entity_type == entity_type
         )
+        if language:
+            stmt = stmt.where(Embedding.embedding_language == language)
         result = await self.session.execute(stmt)
         rows = result.all()
 
@@ -131,7 +155,10 @@ class VectorStore:
 
         valid_rows = []
         valid_embeddings = []
+        query_dim = len(embedding)
         for row in rows:
+            if not row[1] or len(row[1]) != query_dim:
+                continue
             try:
                 self._validate_embedding_dimension(row[1])
             except ValueError:

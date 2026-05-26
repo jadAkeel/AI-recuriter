@@ -15,8 +15,12 @@ export default function Login() {
     try {
       const me = await login(email, password);
       navigate(me.role === 'candidate' ? '/jobs' : '/dashboard');
-    } catch {
-      setError('Invalid email or password');
+    } catch (err: unknown) {
+      if (err && typeof err === 'object' && 'response' in err) {
+        setError('Invalid email or password');
+      } else {
+        setError('Cannot connect to server. Make sure the backend is running.');
+      }
     }
   };
 

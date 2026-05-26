@@ -1,0 +1,11 @@
+Alex Engineer
+Email: alex.engineer@example.com
+Summary
+Backend engineer building Python and FastAPI services.
+Skills
+Python, FastAPI, PostgreSQL, Docker, Redis, REST API
+Experience
+Backend Engineer at ExampleCorp 2020 - 2025
+Built Python FastAPI APIs with PostgreSQL, Redis caching, and Docker deployments.
+Projects
+Vector search API using pgvector and semantic search.

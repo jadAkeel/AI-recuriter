@@ -47,6 +47,7 @@ export interface MatchReasoning {
   score_weights?: Record<string, number>;
   score_contributions?: Record<string, number>;
   score_penalties?: Record<string, number>;
+  score_trace?: Record<string, unknown>;
   pre_cap_score?: number;
   score_cap?: number;
   score_cap_reason?: string;
@@ -88,18 +89,43 @@ export interface InterviewSessionResponse {
   questions: InterviewQuestion[];
   status?: string;
   answered_count?: number;
+  answered_question_ids?: string[];
+  current_question_id?: string | null;
   total_questions?: number;
   is_completed?: boolean;
 }
 
 export interface InterviewEvaluation {
+  session_id?: string;
+  status?: string;
+  is_completed?: boolean;
   overall_score: number;
   feedback?: string;
   strengths: string[];
   weaknesses: string[];
   skill_scores?: Record<string, number>;
+  languages_used?: string[];
   answered_questions?: number;
   total_questions?: number;
+}
+
+export interface InterviewAnswerSummary {
+  question_id: string;
+  skill: string;
+  answer: string;
+  score: number;
+  feedback: string;
+}
+
+export interface InterviewSessionStatus {
+  session_id: string;
+  job_id: string;
+  candidate_id: string;
+  status: string;
+  answers_count: number;
+  questions: InterviewQuestion[];
+  answers: InterviewAnswerSummary[];
+  average_score?: number | null;
 }
 
 export interface PublicInterviewAnswerResponse {
@@ -113,7 +139,24 @@ export interface PublicInterviewAnswerResponse {
   strengths: string[];
   weaknesses: string[];
   using_llm: boolean;
+  evaluation_status?: string;
   next_question?: InterviewQuestion | null;
+}
+
+export interface DashboardInterviewResult {
+  session_id?: string | null;
+  report_id?: string | null;
+  candidate_id: string;
+  candidate_name?: string | null;
+  job_id: string;
+  job_title?: string | null;
+  status: string;
+  analysis_status: 'in_progress' | 'queued' | 'analyzing' | 'ready' | string;
+  interview_score: number;
+  match_score?: number | null;
+  report_score?: number | null;
+  answered_questions: number;
+  total_questions: number;
 }
 
 export interface SkillGapItem {
@@ -130,6 +173,15 @@ export interface ReportResponse {
     similarity_score: number;
     required_skills_score: number;
     optional_skills_score: number;
+    scoring_model?: string | null;
+    scoring_formula?: string | null;
+    score_weights?: Record<string, number>;
+    score_contributions?: Record<string, number>;
+    score_penalties?: Record<string, number>;
+    pre_cap_score?: number | null;
+    score_cap?: number | null;
+    score_cap_reason?: string | null;
+    score_trace?: Record<string, unknown>;
   };
   skill_gap: {
     items: SkillGapItem[];

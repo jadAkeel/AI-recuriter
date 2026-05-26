@@ -11,6 +11,7 @@ export function Sidebar() {
     { to: '/candidates', label: 'Candidates', icon: Users },
     { to: '/bulk-upload', label: 'Bulk Upload', icon: UploadCloud },
     { to: '/matching', label: 'Matching', icon: GitCompare },
+    { to: '/match-results', label: 'Match Results', icon: GitCompare },
     { to: '/interviews', label: 'Interviews', icon: MessageSquare },
     { to: '/reports', label: 'Reports', icon: BarChart3 },
   ];
@@ -25,23 +26,44 @@ export function Sidebar() {
   const links = user?.role === 'candidate' ? candidateLinks : recruiterLinks;
 
   return (
-    <aside className="fixed left-0 top-16 bottom-0 w-64 bg-white border-r border-gray-200 p-4 overflow-y-auto hidden md:block">
-      <nav className="space-y-1">
-        {links.map((link) => (
-          <NavLink
-            key={link.to}
-            to={link.to}
-            className={({ isActive }) =>
-              `flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${
-                isActive ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-600 hover:bg-gray-50'
-              }`
-            }
-          >
-            <link.icon className="w-4 h-4" />
-            {link.label}
-          </NavLink>
-        ))}
+    <>
+      <aside className="fixed left-0 top-16 bottom-0 w-64 bg-white border-r border-gray-200 p-4 overflow-y-auto hidden md:block">
+        <nav className="space-y-1">
+          {links.map((link) => (
+            <NavLink
+              key={link.to}
+              to={link.to}
+              className={({ isActive }) =>
+                `flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${
+                  isActive ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-600 hover:bg-gray-50'
+                }`
+              }
+            >
+              <link.icon className="w-4 h-4" />
+              {link.label}
+            </NavLink>
+          ))}
+        </nav>
+      </aside>
+
+      <nav className="fixed bottom-0 left-0 right-0 z-50 bg-white border-t border-gray-200 md:hidden">
+        <div className="grid" style={{ gridTemplateColumns: `repeat(${links.length}, minmax(0, 1fr))` }}>
+          {links.map((link) => (
+            <NavLink
+              key={link.to}
+              to={link.to}
+              className={({ isActive }) =>
+                `flex flex-col items-center gap-1 px-1 py-2 text-[11px] transition-colors ${
+                  isActive ? 'text-blue-700 font-medium' : 'text-gray-500'
+                }`
+              }
+            >
+              <link.icon className="w-4 h-4" />
+              <span className="truncate max-w-full">{link.label}</span>
+            </NavLink>
+          ))}
+        </div>
       </nav>
-    </aside>
+    </>
   );
 }

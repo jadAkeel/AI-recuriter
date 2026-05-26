@@ -10,6 +10,7 @@ import Jobs from './pages/recruiter/Jobs';
 import BulkUpload from './pages/recruiter/BulkUpload';
 import Candidates from './pages/recruiter/Candidates';
 import Matching from './pages/recruiter/Matching';
+import MatchResults from './pages/recruiter/MatchResults';
 import RecruiterInterviews from './pages/recruiter/Interviews';
 import Reports from './pages/recruiter/Reports';
 import UploadCV from './pages/candidate/UploadCV';
@@ -50,6 +51,9 @@ function App() {
             } />
             <Route path="/matching" element={
               <ProtectedRoute roles={staffRoles}><Matching /></ProtectedRoute>
+            } />
+            <Route path="/match-results" element={
+              <ProtectedRoute roles={staffRoles}><MatchResults /></ProtectedRoute>
             } />
             <Route path="/interviews" element={
               <ProtectedRoute roles={staffRoles}><RecruiterInterviews /></ProtectedRoute>

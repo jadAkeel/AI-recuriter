@@ -6,13 +6,43 @@ import logging
 import math
 import os
 from collections import OrderedDict
-from typing import Protocol
+from typing import Any, Protocol
 
 import numpy as np
 
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def is_arabic(text: str | None) -> bool:
+    """
+    Checks if a given text contains Arabic characters.
+    """
+    if not text:
+        return False
+    for char in text:
+        if ('\u0600' <= char <= '\u06FF' or 
+            '\u0750' <= char <= '\u077F' or 
+            '\u08A0' <= char <= '\u08FF' or 
+            '\uFB50' <= char <= '\uFDFF' or 
+            '\uFE70' <= char <= '\uFEFF'):
+            return True
+    return False
+
+
+def detect_language(text: str) -> str | None:
+    """
+    Detects the language of a text, with Arabic detection as high-priority fallback.
+    """
+    if is_arabic(text):
+        return "ar"
+    try:
+        from langdetect import detect
+        return detect(text)
+    except Exception:
+        return "en"
+
 
 
 class EmbeddingProvider(Protocol):
@@ -45,12 +75,18 @@ class LocalEmbeddingService:
         return [vector.tolist() for vector in vectors]
 
 
-class HashEmbeddingService:
+class DevelopmentFallbackEmbedding:
     def __init__(self, dimension: int | None = None) -> None:
         """
         Initializes deterministic hash embeddings with the configured dimension.
         """
+        if settings.is_production:
+            raise RuntimeError("DevelopmentFallbackEmbedding (hash provider) cannot be used in a production environment.")
         self.dimension = dimension or settings.embedding_dimension
+        logger.warning(
+            "WARNING: Using DevelopmentFallbackEmbedding — semantic scores ZERO. "
+            "Set EMBEDDING_PROVIDER=sentence-transformers in production."
+        )
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         """
@@ -67,15 +103,18 @@ class HashEmbeddingService:
         embeddings: list[list[float]] = []
         for text in texts:
             if not is_embedding_quality_text(text):
-                embeddings.append(zero_embedding())
+                dim = 768 if (settings.use_multilingual_embedding or (settings.auto_detect_lang and is_arabic(text))) else self.dimension
+                embeddings.append(zero_embedding(dim))
                 continue
+            dim = 768 if (settings.use_multilingual_embedding or (settings.auto_detect_lang and is_arabic(text))) else self.dimension
             digest = hashlib.sha256(text.encode("utf-8")).digest()
             seed = int.from_bytes(digest[:8], "big", signed=False)
             rng = np.random.default_rng(seed)
-            vector = rng.standard_normal(self.dimension)
+            vector = rng.standard_normal(dim)
             vector = vector / np.linalg.norm(vector)
             embeddings.append(vector.tolist())
         return embeddings
+
 
 
 class OllamaEmbeddingService:
@@ -120,7 +159,7 @@ class FallbackEmbeddingService:
         Initializes primary and fallback embedding providers.
         """
         self._primary = primary
-        self._fallback = fallback or HashEmbeddingService()
+        self._fallback = fallback or DevelopmentFallbackEmbedding()
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         """
@@ -132,6 +171,12 @@ class FallbackEmbeddingService:
                 expected_count=len(texts),
             )
         except Exception as exc:
+            if settings.is_production:
+                logger.error(
+                    "Embedding provider failed; deterministic fallback is disabled in production",
+                    extra={"error_type": type(exc).__name__},
+                )
+                raise RuntimeError("Embedding provider failed and production fallback is disabled") from exc
             logger.warning(
                 "Embedding provider failed; using deterministic fallback",
                 extra={"error_type": type(exc).__name__},
@@ -169,7 +214,7 @@ class CachedEmbeddingService:
                 self._cache[key] = cached
                 results[i] = cached
             elif not is_embedding_quality_text(text):
-                vector = zero_embedding()
+                vector = zero_embedding(embedding_dimension_for_text(text))
                 self._cache[key] = vector
                 while len(self._cache) > self._max_size:
                     self._cache.popitem(last=False)
@@ -224,11 +269,15 @@ def validate_embedding_vector(embedding: list[float], expected_dimension: int | 
     """
     Validates embedding dimensions and numeric values.
     """
-    expected = expected_dimension or settings.embedding_dimension
-    if len(embedding) != expected:
+    if expected_dimension is not None:
+        expected_dims = {expected_dimension}
+    else:
+        expected_dims = {384, 768, settings.embedding_dimension}
+        
+    if len(embedding) not in expected_dims:
         raise ValueError(
             "Embedding dimension mismatch: "
-            f"got {len(embedding)}, expected {expected}. "
+            f"got {len(embedding)}, expected one of {expected_dims}. "
             "Set EMBEDDING_DIMENSION to match the configured embedding model."
         )
     for value in embedding:
@@ -253,7 +302,18 @@ def zero_embedding(dimension: int | None = None) -> list[float]:
     return [0.0] * (dimension or settings.embedding_dimension)
 
 
-def embedding_model_name_for_provider(provider: str | None = None) -> str:
+def embedding_dimension_for_text(text: str | None = None) -> int:
+    """
+    Returns the expected embedding dimension for the configured language route.
+    """
+    if settings.use_multilingual_embedding:
+        return 768
+    if settings.auto_detect_lang and is_arabic(text):
+        return 768
+    return settings.embedding_dimension
+
+
+def embedding_model_name_for_provider(provider: str | None = None, text: str | None = None) -> str:
     """
     Returns the model name used by the selected embedding provider.
     """
@@ -262,19 +322,54 @@ def embedding_model_name_for_provider(provider: str | None = None) -> str:
         return "hash"
     if selected == "ollama":
         return settings.ollama_embedding_model
+    if settings.use_multilingual_embedding or (settings.auto_detect_lang and is_arabic(text)):
+        return settings.multilingual_embedding_model
     return settings.embedding_model
 
 
-def embedding_metadata_for_text(text: str, provider: str | None = None) -> dict[str, str]:
+def embedding_metadata_for_text(text: str, provider: str | None = None) -> dict[str, Any]:
     """
     Builds metadata that ties an embedding to its provider, model, and source text.
     """
     selected = (provider or settings.embedding_provider).lower()
+    lang = detect_language(text) or "en"
     return {
         "provider": selected,
-        "model_name": embedding_model_name_for_provider(selected),
+        "model_name": embedding_model_name_for_provider(selected, text),
         "source_hash": hashlib.sha256(str(text or "").encode("utf-8")).hexdigest(),
+        "is_fallback": selected == "hash",
+        "embedding_language": lang,
     }
+
+
+class LanguageRoutingEmbeddingService:
+    """Routes Arabic text to multilingual embeddings while keeping English on the standard model."""
+
+    def __init__(self, standard: EmbeddingProvider, multilingual: EmbeddingProvider) -> None:
+        self._standard = standard
+        self._multilingual = multilingual
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        standard_items: list[tuple[int, str]] = []
+        multilingual_items: list[tuple[int, str]] = []
+        for index, text in enumerate(texts):
+            if settings.use_multilingual_embedding or (settings.auto_detect_lang and is_arabic(text)):
+                multilingual_items.append((index, text))
+            else:
+                standard_items.append((index, text))
+
+        results: list[list[float] | None] = [None] * len(texts)
+        if standard_items:
+            embeddings = await self._standard.embed([text for _, text in standard_items])
+            for (index, _), embedding in zip(standard_items, embeddings):
+                results[index] = embedding
+        if multilingual_items:
+            embeddings = await self._multilingual.embed([text for _, text in multilingual_items])
+            for (index, _), embedding in zip(multilingual_items, embeddings):
+                results[index] = embedding
+        if any(result is None for result in results):
+            raise RuntimeError("Language routing failed to populate all requested vectors")
+        return [result for result in results if result is not None]
 
 
 async def _retry_backoff(attempt: int) -> None:
@@ -287,29 +382,91 @@ async def _retry_backoff(attempt: int) -> None:
     await asyncio.sleep(delay)
 
 
-@functools.lru_cache(maxsize=1)
+@functools.lru_cache(maxsize=4)
+def _get_cached_embedding_service(provider: str, model_name: str, dimension: int) -> EmbeddingProvider:
+    """
+    Builds the inner service based on provider, model name, and dimension.
+    """
+    inner: EmbeddingProvider
+    if provider == "hash":
+        if settings.is_production:
+            raise RuntimeError("DevelopmentFallbackEmbedding (hash provider) cannot be used in a production environment.")
+        inner = DevelopmentFallbackEmbedding(dimension=dimension)
+    elif provider == "ollama":
+        primary = OllamaEmbeddingService(model_name=settings.ollama_embedding_model)
+        inner = primary if settings.is_production else FallbackEmbeddingService(
+            primary,
+            DevelopmentFallbackEmbedding(dimension=dimension),
+        )
+    else:
+        if settings.is_production:
+            inner = LocalEmbeddingService(model_name)
+        else:
+            try:
+                inner = FallbackEmbeddingService(
+                    LocalEmbeddingService(model_name),
+                    DevelopmentFallbackEmbedding(dimension=dimension),
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"Local embedding provider ({model_name}) unavailable; using deterministic fallback",
+                    extra={"error_type": type(exc).__name__},
+                )
+                inner = DevelopmentFallbackEmbedding(dimension=dimension)
+    return CachedEmbeddingService(inner)
+
+
 def get_embedding_service() -> EmbeddingProvider:
     """
     Creates and caches the configured embedding service chain.
     """
     provider = settings.embedding_provider.lower()
-    inner: EmbeddingProvider
+    if settings.use_multilingual_embedding:
+        return get_multilingual_embedding_service()
+    if settings.auto_detect_lang:
+        return LanguageRoutingEmbeddingService(
+            get_standard_embedding_service(),
+            get_multilingual_embedding_service(),
+        )
+    return get_standard_embedding_service()
 
-    if provider == "hash":
-        logger.info("Using hash embedding provider")
-        inner = HashEmbeddingService()
-    elif provider == "ollama":
-        logger.info("Using Ollama embedding provider", extra={"model": settings.ollama_embedding_model})
-        inner = FallbackEmbeddingService(OllamaEmbeddingService())
-    else:
-        logger.info("Using local embedding provider", extra={"model": settings.embedding_model})
-        try:
-            inner = FallbackEmbeddingService(LocalEmbeddingService(settings.embedding_model))
-        except Exception as exc:
-            logger.warning(
-                "Local embedding provider unavailable at startup; using deterministic fallback",
-                extra={"error_type": type(exc).__name__},
-            )
-            inner = HashEmbeddingService()
 
-    return CachedEmbeddingService(inner)
+def get_multilingual_embedding_service() -> EmbeddingProvider:
+    """
+    Creates and caches the multilingual embedding service chain.
+    """
+    provider = settings.embedding_provider.lower()
+    model_name = settings.multilingual_embedding_model
+    return _get_cached_embedding_service(provider, model_name, 768)
+
+
+def get_standard_embedding_service() -> EmbeddingProvider:
+    """
+    Creates and caches the standard (English) embedding service chain.
+    """
+    provider = settings.embedding_provider.lower()
+    model_name = settings.embedding_model
+    return _get_cached_embedding_service(provider, model_name, settings.embedding_dimension)
+
+
+# Attach cache_clear for backward compatibility with tests and callers
+get_embedding_service.cache_clear = _get_cached_embedding_service.cache_clear
+get_multilingual_embedding_service.cache_clear = _get_cached_embedding_service.cache_clear
+get_standard_embedding_service.cache_clear = _get_cached_embedding_service.cache_clear
+
+
+# Export HashEmbeddingService as an alias for backward compatibility
+HashEmbeddingService = DevelopmentFallbackEmbedding
+
+
+async def upsert_candidate_embedding(
+    session: AsyncSession,
+    candidate_id: str,
+    profile: Any,
+) -> None:
+    """
+    Creates or updates the embedding stored for a candidate profile.
+    """
+    from app.services.candidate_text import upsert_candidate_embedding as _upsert_candidate_embedding
+
+    await _upsert_candidate_embedding(session, candidate_id, profile)

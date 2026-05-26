@@ -13,6 +13,7 @@ from app.models.job import Job
 from app.models.match_result import MatchResult
 from app.models.user import User
 from app.schemas.match import MatchItem, MatchResponse
+from app.services.ai_metadata import current_ai_provider_metadata, scoring_version_from_reasoning
 from app.services.embedding import get_embedding_service
 from app.services.hybrid_matcher import (
     HybridMatchingEngine,
@@ -143,6 +144,15 @@ async def _filter_candidates(
     """
     Applies candidate search and filter options before matching.
     """
+    if min_skills is not None and min_skills < 0:
+        raise HTTPException(status_code=400, detail="min_skills must be >= 0")
+    if min_years is not None and min_years < 0:
+        raise HTTPException(status_code=400, detail="min_years must be >= 0")
+    if max_years is not None and max_years < 0:
+        raise HTTPException(status_code=400, detail="max_years must be >= 0")
+    if min_years is not None and max_years is not None and min_years > max_years:
+        raise HTTPException(status_code=400, detail="min_years cannot exceed max_years")
+
     stmt = select(Candidate)
 
     if search:
@@ -150,6 +160,16 @@ async def _filter_candidates(
         stmt = stmt.where(
             Candidate.full_name.ilike(f"%{search_lower}%")
             | Candidate.email.ilike(f"%{search_lower}%")
+        )
+    if min_years is not None:
+        stmt = stmt.where(
+            Candidate.total_years_experience.is_not(None),
+            Candidate.total_years_experience >= min_years,
+        )
+    if max_years is not None:
+        stmt = stmt.where(
+            Candidate.total_years_experience.is_not(None),
+            Candidate.total_years_experience <= max_years,
         )
 
     result = await session.execute(stmt)
@@ -168,21 +188,8 @@ async def _filter_candidates(
                 if all(skill_lower in set(_candidate_display_skills(c)) for skill_lower in skill_list)
             ]
 
-    if min_skills is not None and min_skills < 0:
-        raise HTTPException(status_code=400, detail="min_skills must be >= 0")
-    if min_years is not None and min_years < 0:
-        raise HTTPException(status_code=400, detail="min_years must be >= 0")
-    if max_years is not None and max_years < 0:
-        raise HTTPException(status_code=400, detail="max_years must be >= 0")
-    if min_years is not None and max_years is not None and min_years > max_years:
-        raise HTTPException(status_code=400, detail="min_years cannot exceed max_years")
-
     if min_skills is not None:
         candidates = [c for c in candidates if len(_candidate_display_skills(c)) >= min_skills]
-    if min_years is not None:
-        candidates = [c for c in candidates if c.total_years_experience is not None and c.total_years_experience >= min_years]
-    if max_years is not None:
-        candidates = [c for c in candidates if c.total_years_experience is not None and c.total_years_experience <= max_years]
 
     if education_search:
         q = education_search.lower()
@@ -278,6 +285,9 @@ async def _refresh_stale_saved_matches(
         )
         match.score = current.final_score
         match.reasoning = current.to_dict()
+        match.scoring_version = scoring_version_from_reasoning(match.reasoning)
+        match.provider_metadata = current_ai_provider_metadata()
+        match.is_stale = False
         refreshed += 1
 
     if refreshed:
@@ -307,8 +317,7 @@ def _candidate_display_skills(candidate: Candidate) -> list[str]:
             continue
         status = str(detail.get("status", "")).lower().strip()
         name = str(detail.get("name", "")).strip()
-        context = str(detail.get("context", "") or "").strip()
-        if name and status not in {"no_experience", "learning"} and context:
+        if name and status != "no_experience":
             skills.append(name)
 
     result: list[str] = []

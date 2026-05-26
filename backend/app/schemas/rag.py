@@ -33,3 +33,5 @@ class DocumentItem(BaseModel):
 class QueryResponse(BaseModel):
     query: str
     results: list[DocumentItem]
+    query_language: str | None = None
+

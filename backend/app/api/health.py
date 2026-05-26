@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import logging
 from fastapi import APIRouter
+from fastapi.responses import JSONResponse
 
-from app.core.db import check_db_connection
 from app.schemas.health import HealthResponse
+from app.services.readiness import collect_readiness
 
 logger = logging.getLogger(__name__)
 
@@ -19,11 +20,33 @@ async def health() -> HealthResponse:
     return HealthResponse(status="ok")
 
 
-@router.get("/ready", response_model=HealthResponse)
-async def readiness() -> HealthResponse:
+@router.get("/ready")
+async def readiness() -> JSONResponse:
     """
-    Checks database readiness for the API.
+    Checks runtime readiness for production dependencies.
     """
-    ok = await check_db_connection()
-    status = "ok" if ok else "degraded"
-    return HealthResponse(status=status)
+    body = await collect_readiness()
+    status_code = 200 if body["status"] == "ok" else 503
+    return JSONResponse(status_code=status_code, content=body)
+
+
+@router.get("/health/embeddings")
+async def health_embeddings():
+    """
+    Returns embedding provider status and checks if embeddings are real or mock fallbacks.
+    """
+    from app.core.config import settings
+    provider = settings.embedding_provider.lower()
+    is_real = provider != "hash"
+    return {
+        "status": "ok",
+        "provider": provider,
+        "is_real": is_real,
+        "model_name": settings.embedding_model,
+        "multilingual_model_name": settings.multilingual_embedding_model,
+        "dimension": settings.embedding_dimension,
+        "use_multilingual_embedding": settings.use_multilingual_embedding,
+        "auto_detect_lang": settings.auto_detect_lang,
+        "is_fallback": provider == "hash",
+    }
+
