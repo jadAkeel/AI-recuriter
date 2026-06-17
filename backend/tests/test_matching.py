@@ -297,6 +297,85 @@ async def test_project_semantic_bonus_is_junior_only() -> None:
 
 
 @pytest.mark.asyncio
+async def test_junior_internship_and_certificate_supply_experience_points() -> None:
+    """
+    Checks that junior internship and relevant certificate evidence affect scoring.
+    """
+    job = Job(
+        id=str(uuid.uuid4()),
+        title="Junior Backend Developer",
+        description="Junior backend developer with FastAPI and AWS exposure.",
+        required_skills=["fastapi"],
+        optional_skills=["aws"],
+        seniority="junior",
+    )
+    candidate = Candidate(
+        id=str(uuid.uuid4()),
+        full_name="Junior Evidence Candidate",
+        email="junior-evidence@example.com",
+        phone=None,
+        skills=[],
+        experience=["Software Engineering Intern - built FastAPI APIs for an internal tool."],
+        education=[],
+        projects=[],
+        total_years_experience=None,
+        raw_text=(
+            "Experience\n"
+            "Software Engineering Intern - built FastAPI APIs for an internal tool.\n"
+            "Certifications\n"
+            "AWS Cloud Practitioner Certified.\n"
+        ),
+    )
+
+    result = await HybridMatchingEngine()._compute_match(job, candidate, semantic_score=0.0)
+
+    assert result is not None
+    assert result.years_score == pytest.approx(0.075)
+    assert result.reasoning.score_breakdown["experience"] == pytest.approx(0.075)
+    assert result.reasoning.score_breakdown["seniority"] == pytest.approx(1.0)
+    assert result.reasoning.score_breakdown["junior_evidence_year_credit"] == pytest.approx(0.75)
+    assert result.reasoning.score_trace["junior_evidence_signals"] == [
+        "internship_experience",
+        "relevant_certificate",
+    ]
+    assert "Internship experience supports junior readiness" in result.reasoning.strengths
+    assert "Relevant certificate supports junior readiness" in result.reasoning.strengths
+
+
+@pytest.mark.asyncio
+async def test_junior_certificate_credit_requires_relevance() -> None:
+    """
+    Checks that unrelated certificates do not add junior certificate credit.
+    """
+    job = Job(
+        id=str(uuid.uuid4()),
+        title="Junior Backend Developer",
+        description="Junior backend developer with FastAPI.",
+        required_skills=["fastapi"],
+        optional_skills=[],
+        seniority="junior",
+    )
+    candidate = Candidate(
+        id=str(uuid.uuid4()),
+        full_name="Unrelated Certificate Candidate",
+        email="unrelated-certificate@example.com",
+        phone=None,
+        skills=[],
+        experience=[],
+        education=[],
+        projects=[],
+        total_years_experience=None,
+        raw_text="Certifications\nFood Safety Certificate.",
+    )
+
+    result = await HybridMatchingEngine()._compute_match(job, candidate, semantic_score=0.0)
+
+    assert result is not None
+    assert result.reasoning.score_trace["junior_evidence_signals"] == []
+    assert "junior_evidence_year_credit" not in result.reasoning.score_breakdown
+
+
+@pytest.mark.asyncio
 async def test_rank_candidates_returns_results() -> None:
     """
     Checks that rank candidates returns results.

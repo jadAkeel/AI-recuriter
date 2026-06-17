@@ -82,6 +82,19 @@ class JobUpdateRequest(BaseModel):
     optional_skills: list[str] | None = None
     seniority: str | None = None
 
+    @field_validator("description", mode="before")
+    @classmethod
+    def _normalize_update_description(cls, value: str | None) -> str | None:
+        """
+        Normalizes optional job descriptions and rejects empty updates.
+        """
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        if not normalized:
+            raise ValueError("description cannot be empty")
+        return normalized
+
     @field_validator("required_skills", "optional_skills")
     @classmethod
     def _normalize_optional_skills(cls, values: list[str] | None) -> list[str] | None:

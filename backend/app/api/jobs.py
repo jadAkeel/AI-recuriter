@@ -241,10 +241,11 @@ def _to_job_record(job: Job) -> JobRecord:
         skill for skill in _normalize_skill_list(job.optional_skills or [])
         if skill not in set(required_skills)
     ]
+    description = (job.description or "").strip() or (job.title or "").strip() or "No description provided."
     return JobRecord(
         job_id=job.id,
         title=job.title,
-        description=job.description,
+        description=description,
         required_skills=required_skills,
         optional_skills=optional_skills,
         seniority=job.seniority,

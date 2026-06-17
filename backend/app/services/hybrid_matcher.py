@@ -37,6 +37,7 @@ from app.services.skill_catalog import (
     normalize_skill_name,
 )
 from app.services.project_semantic import (
+    compute_junior_evidence_year_credit,
     compute_junior_project_semantic_bonus,
     is_junior_job,
 )
@@ -739,12 +740,19 @@ class HybridMatchingEngine:
             # Skill matching
             skill_result = await self._compute_skill_match(job, candidate, rag_session=rag_session)
             
-            # Experience/seniority matching
-            seniority_score = self._compute_seniority_match(job, candidate)
-            
             # Estimated years for frontend compatibility
             estimated_years = candidate.total_years_experience
-            years_score = min(1.0, max(0.0, float(estimated_years or 0.0)) / 10.0)
+            junior_evidence_year_credit, junior_evidence_signals = self._compute_junior_evidence_year_credit(
+                job,
+                candidate,
+            )
+            actual_years = max(0.0, float(estimated_years or 0.0))
+            effective_years = max(actual_years, junior_evidence_year_credit)
+            years_score = min(1.0, effective_years / 10.0)
+
+            # Experience/seniority matching
+            seniority_years = effective_years if estimated_years is not None or junior_evidence_year_credit > 0 else None
+            seniority_score = compute_seniority_score(job.seniority, seniority_years)
             
             project_semantic_bonus = self._compute_junior_project_semantic_bonus(job, candidate)
             effective_semantic_score = max(semantic_score, project_semantic_bonus)
@@ -759,6 +767,8 @@ class HybridMatchingEngine:
                 years_score,
                 raw_semantic_score=semantic_score,
                 project_semantic_bonus=project_semantic_bonus,
+                junior_evidence_year_credit=junior_evidence_year_credit,
+                junior_evidence_signals=junior_evidence_signals,
             )
             
             # Compute final score
@@ -809,6 +819,12 @@ class HybridMatchingEngine:
         Computes the capped semantic bonus from relevant junior project evidence.
         """
         return compute_junior_project_semantic_bonus(job, candidate)
+
+    def _compute_junior_evidence_year_credit(self, job: Job, candidate: Candidate) -> tuple[float, list[str]]:
+        """
+        Computes junior experience credit from internships and certificates.
+        """
+        return compute_junior_evidence_year_credit(job, candidate)
     
     def _evidence_text(self, candidate: Candidate) -> str:
         """Build evidence text from candidate fields for skill matching."""
@@ -1354,9 +1370,12 @@ class HybridMatchingEngine:
         years_score: float,
         raw_semantic_score: float | None = None,
         project_semantic_bonus: float = 0.0,
+        junior_evidence_year_credit: float = 0.0,
+        junior_evidence_signals: list[str] | None = None,
     ) -> MatchReasoning:
         """Build detailed reasoning for the match."""
         reasoning = MatchReasoning()
+        junior_evidence_signals = junior_evidence_signals or []
         
         # Score breakdown
         reasoning.score_breakdown = {
@@ -1369,6 +1388,8 @@ class HybridMatchingEngine:
         if project_semantic_bonus > 0:
             reasoning.score_breakdown["raw_semantic"] = raw_semantic_score or 0.0
             reasoning.score_breakdown["project_semantic_bonus"] = project_semantic_bonus
+        if junior_evidence_year_credit > 0:
+            reasoning.score_breakdown["junior_evidence_year_credit"] = junior_evidence_year_credit
         total_required = len(skill_result.matched_required) + len(skill_result.missing_required)
         scoring = compute_explainable_score(
             required_score=skill_result.required_score,
@@ -1383,6 +1404,8 @@ class HybridMatchingEngine:
         reasoning.scoring_formula = BASE_SCORING_FORMULA
         if project_semantic_bonus > 0:
             reasoning.scoring_formula += "; junior project evidence supplied the semantic score boost"
+        if junior_evidence_year_credit > 0:
+            reasoning.scoring_formula += "; junior internship/certificate evidence supplied experience credit"
         reasoning.score_weights = scoring["score_weights"]
         reasoning.score_contributions = scoring["score_contributions"]
         reasoning.score_penalties = scoring["score_penalties"]
@@ -1399,6 +1422,8 @@ class HybridMatchingEngine:
             "optional_confidence_sum": round(sum(match.confidence for match in skill_result.matched_optional), 4),
             "required_score_type": "confidence_weighted_coverage",
             "optional_score_type": "confidence_weighted_coverage",
+            "junior_evidence_year_credit": round(junior_evidence_year_credit, 4),
+            "junior_evidence_signals": junior_evidence_signals,
         }
         reasoning.pre_cap_score = scoring["pre_cap_score"]
         reasoning.score_cap = scoring["score_cap"]
@@ -1417,6 +1442,10 @@ class HybridMatchingEngine:
             reasoning.strengths.append("Good semantic alignment")
         if project_semantic_bonus > 0:
             reasoning.strengths.append("Relevant project evidence for junior role")
+        if "internship_experience" in junior_evidence_signals:
+            reasoning.strengths.append("Internship experience supports junior readiness")
+        if "relevant_certificate" in junior_evidence_signals:
+            reasoning.strengths.append("Relevant certificate supports junior readiness")
         if skill_result.rag_matched_count:
             reasoning.strengths.append("RAG knowledge base supplied weak skill evidence")
         if seniority_score >= 0.8:

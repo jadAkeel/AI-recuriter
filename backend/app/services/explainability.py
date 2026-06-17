@@ -32,7 +32,7 @@ from app.services.hybrid_matcher import (
     is_interview_blended_reasoning,
 )
 from app.services.matching import SYNONYM_MAP, _expand_skills_with_synonyms, _skill_matches_required, compute_skill_score
-from app.services.project_semantic import compute_junior_project_semantic_bonus
+from app.services.project_semantic import compute_junior_evidence_year_credit, compute_junior_project_semantic_bonus
 from app.services.skill_catalog import is_job_skill_name, normalize_skill_name, skill_in_text
 from app.services.vector_store import VectorStore
 
@@ -434,8 +434,13 @@ async def generate_candidate_report(
         )
     similarity_score = max(similarity_score, round(project_bonus, 4))
     est_years = skill_data.get("estimated_years", 0) or 0
-    years_score = min(1.0, max(0.0, est_years / 10))
-    seniority_score = compute_seniority_score(job.seniority, est_years)
+    junior_evidence_year_credit, junior_evidence_signals = compute_junior_evidence_year_credit(job, candidate)
+    effective_years = max(float(est_years or 0), junior_evidence_year_credit)
+    years_score = min(1.0, max(0.0, effective_years / 10))
+    seniority_score = compute_seniority_score(
+        job.seniority,
+        effective_years if est_years or junior_evidence_year_credit > 0 else None,
+    )
     total_required = len(skill_data.get("matched_required", [])) + len(skill_data.get("missing_required", []))
     fallback_scoring = compute_explainable_score(
         required_score=required_score,
@@ -509,6 +514,8 @@ async def generate_candidate_report(
             "job_id": job.id,
             "candidate_id": candidate.id,
             "source": "report_fallback_no_saved_match",
+            "junior_evidence_year_credit": round(junior_evidence_year_credit, 4),
+            "junior_evidence_signals": junior_evidence_signals,
         }
 
     score_breakdown = ScoreBreakdown(
@@ -657,8 +664,13 @@ async def compare_candidates(
         if candidate.total_years_experience is not None:
             skill_data["estimated_years"] = candidate.total_years_experience
         est_years = skill_data.get("estimated_years", 0) or 0
-        years_score = min(1.0, max(0.0, est_years / 10))
-        seniority_score = compute_seniority_score(job.seniority, est_years)
+        junior_evidence_year_credit, _junior_evidence_signals = compute_junior_evidence_year_credit(job, candidate)
+        effective_years = max(float(est_years or 0), junior_evidence_year_credit)
+        years_score = min(1.0, max(0.0, effective_years / 10))
+        seniority_score = compute_seniority_score(
+            job.seniority,
+            effective_years if est_years or junior_evidence_year_credit > 0 else None,
+        )
         total_required = len(skill_data.get("matched_required", [])) + len(skill_data.get("missing_required", []))
         fallback_scoring = compute_explainable_score(
             required_score=skill_data["required_score"],
