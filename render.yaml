@@ -16,8 +16,9 @@ services:
           name: ai-recruiter-db
           property: connectionString
       - key: REDIS_URL
-        fromRedis:
+        fromService:
           name: ai-recruiter-redis
+          type: redis
           property: connectionString
       - key: ENVIRONMENT
         value: production
@@ -57,12 +58,13 @@ services:
         source: /*
         destination: /index.html
 
+  # Managed Redis for background tasks & rate limiting
+  - type: redis
+    name: ai-recruiter-redis
+    plan: free
+    ipAllowList: []
+
 databases:
   # Managed PostgreSQL Database with pgvector support
   - name: ai-recruiter-db
-    plan: free
-
-redises:
-  # Managed Redis for background tasks & rate limiting
-  - name: ai-recruiter-redis
     plan: free
