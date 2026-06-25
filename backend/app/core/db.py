@@ -16,6 +16,11 @@ def _create_engine() -> AsyncEngine:
     Creates the async database engine from current settings.
     """
     url = str(settings.database_url)
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql+asyncpg://", 1)
+    elif url.startswith("postgresql://") and not url.startswith("postgresql+"):
+        url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        
     connect_args = {}
     # Enable WAL mode for SQLite to allow concurrent reads during writes
     if url.startswith("sqlite"):
