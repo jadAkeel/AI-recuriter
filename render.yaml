@@ -5,7 +5,7 @@ services:
   # Backend API Service (FastAPI)
   - type: web
     name: ai-recruiter-backend
-    env: python
+    runtime: python
     plan: free
     rootDir: backend
     buildCommand: pip install -r requirements-prod.txt
@@ -40,11 +40,11 @@ services:
   # Frontend Web Service (Vite + React + TS)
   - type: web
     name: ai-recruiter-frontend
-    env: static
+    runtime: static
     plan: free
     rootDir: frontend
     buildCommand: npm install && npm run build
-    publishDir: dist
+    staticPublishPath: dist
     envVars:
       - key: VITE_API_BASE_URL
         value: /api/v1
