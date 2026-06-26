@@ -21,7 +21,16 @@ import app.models.report  # noqa: F401
 import app.models.user  # noqa: F401
 
 config = context.config
-config.set_main_option("sqlalchemy.url", settings.database_url)
+
+# Normalize database URL for async driver compatibility.
+# Render provides postgres:// but SQLAlchemy+asyncpg needs postgresql+asyncpg://
+_db_url = str(settings.database_url)
+if _db_url.startswith("postgres://"):
+    _db_url = _db_url.replace("postgres://", "postgresql+asyncpg://", 1)
+elif _db_url.startswith("postgresql://") and not _db_url.startswith("postgresql+"):
+    _db_url = _db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+
+config.set_main_option("sqlalchemy.url", _db_url)
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
@@ -34,7 +43,7 @@ def run_migrations_offline() -> None:
     Runs Alembic migrations without opening a live database connection.
     """
     context.configure(
-        url=settings.database_url,
+        url=_db_url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
