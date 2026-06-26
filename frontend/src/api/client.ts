@@ -3,7 +3,14 @@ import type { InternalAxiosRequestConfig } from 'axios';
 
 type RetriableRequestConfig = InternalAxiosRequestConfig & { _retry?: boolean };
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api/v1';
+const getApiBaseUrl = () => {
+  let url = import.meta.env.VITE_API_BASE_URL || '/api/v1';
+  if (url.startsWith('http') && !url.endsWith('/api/v1')) {
+    url = url.replace(/\/$/, '') + '/api/v1';
+  }
+  return url;
+};
+const API_BASE_URL = getApiBaseUrl();
 let refreshPromise: Promise<string> | null = null;
 
 const api = axios.create({

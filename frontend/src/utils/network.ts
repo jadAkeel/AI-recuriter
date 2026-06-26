@@ -1,4 +1,11 @@
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api/v1';
+const getApiBaseUrl = () => {
+  let url = import.meta.env.VITE_API_BASE_URL || '/api/v1';
+  if (url.startsWith('http') && !url.endsWith('/api/v1')) {
+    url = url.replace(/\/$/, '') + '/api/v1';
+  }
+  return url;
+};
+const API_BASE_URL = getApiBaseUrl();
 
 function resolveApiBaseUrl(): URL {
   return new URL(API_BASE_URL, window.location.origin);

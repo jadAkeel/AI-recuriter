@@ -24,6 +24,13 @@ services:
         value: production
       - key: JWT_SECRET_KEY
         generateValue: true
+      - key: CORS_ORIGINS_STR
+        fromService:
+          name: ai-recruiter-frontend
+          type: web
+          property: url
+      - key: TRUSTED_HOSTS_STR
+        value: "localhost,127.0.0.1"
       - key: RUN_CV_WORKER_IN_API
         value: "true"
       - key: EMBEDDING_PROVIDER
@@ -32,10 +39,6 @@ services:
         value: "openai"
       - key: OPENAI_API_KEY
         sync: false # Set this in the Render Dashboard after deploying
-      - key: CORS_ORIGINS_STR
-        value: "https://frontend-ai-recruiter.onrender.com,https://ai-recruiter-frontend.onrender.com"
-      - key: TRUSTED_HOSTS_STR
-        value: "ai-recruiter-backend.onrender.com,ai-recruiter-backend-1.onrender.com"
 
   # Frontend Web Service (Vite + React + TS)
   - type: web
@@ -47,7 +50,10 @@ services:
     staticPublishPath: dist
     envVars:
       - key: VITE_API_BASE_URL
-        value: https://ai-recruiter-backend.onrender.com/api/v1
+        fromService:
+          name: ai-recruiter-backend
+          type: web
+          property: url
     routes:
       # SPA fallback: serve index.html for all client-side routes
       - type: rewrite

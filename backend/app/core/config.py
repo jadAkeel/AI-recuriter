@@ -119,7 +119,12 @@ class Settings(BaseSettings):
         """
         Splits configured trusted hosts into a list.
         """
-        return [host.strip() for host in self.trusted_hosts_str.split(",") if host.strip()]
+        hosts = [host.strip() for host in self.trusted_hosts_str.split(",") if host.strip()]
+        import os
+        render_host = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
+        if render_host and render_host not in hosts:
+            hosts.append(render_host)
+        return hosts
 
     def validate_runtime(self) -> None:
         """Fail fast on unsafe production settings."""
