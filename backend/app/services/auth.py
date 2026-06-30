@@ -3,15 +3,13 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import bcrypt
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models.user import User
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 ALGORITHM = "HS256"
 VALID_ROLES = {"candidate", "recruiter", "admin", "owner"}
@@ -28,7 +26,11 @@ def hash_password(password: str) -> str:
     """
     Hashes a password for safe storage.
     """
-    return pwd_context.hash(password)
+    # Truncate password to 72 bytes (bcrypt algorithm limit) to prevent errors
+    password_bytes = password.encode('utf-8')[:72]
+    salt = bcrypt.gensalt()
+    hashed = bcrypt.hashpw(password_bytes, salt)
+    return hashed.decode('utf-8')
 
 
 def verify_password(plain: str, hashed: str) -> bool:
@@ -36,7 +38,9 @@ def verify_password(plain: str, hashed: str) -> bool:
     Checks a plain password against a stored password hash.
     """
     try:
-        return pwd_context.verify(plain, hashed)
+        plain_bytes = plain.encode('utf-8')[:72]
+        hashed_bytes = hashed.encode('utf-8')
+        return bcrypt.checkpw(plain_bytes, hashed_bytes)
     except Exception:
         return False
 
