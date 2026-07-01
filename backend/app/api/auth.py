@@ -118,3 +118,24 @@ async def change_user_role(
         message = str(exc)
         status_code = status.HTTP_404_NOT_FOUND if message == "User not found" else status.HTTP_400_BAD_REQUEST
         raise HTTPException(status_code=status_code, detail=message) from exc
+
+
+@router.post("/auth/bootstrap-admin", response_model=UserResponse)
+async def bootstrap_admin(
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> UserResponse:
+    """
+    One-time endpoint to promote the first user to owner.
+    Only works if no owner exists in the database yet.
+    """
+    from sqlalchemy import select as sel, func
+    stmt = sel(func.count()).select_from(User).where(User.role == "owner")
+    result = await session.execute(stmt)
+    owner_count = result.scalar() or 0
+    if owner_count > 0:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="An owner already exists")
+
+    updated = await update_user_role(session, current_user.id, "owner")
+    return UserResponse(id=updated.id, email=updated.email, full_name=updated.full_name, role=updated.role)
+
